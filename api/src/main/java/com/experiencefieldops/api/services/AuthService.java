@@ -7,7 +7,8 @@ import com.experiencefieldops.api.dto.UserResponse;
 
 public interface AuthService {
 
-    LoginResponse login(LoginRequest request);
+    /** Autentica o usuário e registra a tentativa de login com IP e timestamp. */
+    LoginResponse login(LoginRequest request, String ip);
 
     UserResponse register(UserRequest request);
 }

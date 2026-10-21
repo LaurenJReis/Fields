@@ -174,6 +174,11 @@ public class SyncServiceImpl implements SyncService {
             entry.setErrorMessage(null);
             outboxRepository.save(entry);
 
+            // Tarefa 4: registrar sincronização bem-sucedida com usuário e resultado
+            auditLogService.log(technicianId, null, AuditAction.STATUS_CHANGE,
+                    "SyncOutbox", entry.getId(),
+                    String.format("Sync OK. tipo=%s chave=%s", op.getOperationType(), op.getIdempotencyKey()));
+
             return SyncOperationResult.success(
                     op.getIdempotencyKey(), op.getInspectionId(), op.getOperationType());
 

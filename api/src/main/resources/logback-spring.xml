@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Tarefa 7: Logs estruturados em JSON com Logback + logstash-logback-encoder.
+
+  - Perfil "prod": saída JSON no console (pronto para ingestão em CloudWatch, ELK, etc.)
+  - Demais perfis (dev, default): saída colorida e legível no console
+-->
+<configuration>
+
+    <!-- ── Appender JSON (produção) ─────────────────────────────────────────── -->
+    <springProfile name="prod">
+        <appender name="JSON_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <!-- Tarefa 5: campos sensíveis nunca aparecem no log -->
+                <fieldNames>
+                    <timestamp>timestamp</timestamp>
+                    <message>message</message>
+                    <logger>logger</logger>
+                    <thread>thread</thread>
+                    <levelValue>[ignore]</levelValue>
+                </fieldNames>
+                <!-- Inclui MDC automaticamente (ex: traceId, userId se adicionado ao contexto) -->
+                <includeMdc>true</includeMdc>
+                <!-- Adiciona campo "app" fixo para filtro no agregador de logs -->
+                <customFields>{"app":"fieldops-api","env":"prod"}</customFields>
+            </encoder>
+        </appender>
+
+        <root level="INFO">
+            <appender-ref ref="JSON_CONSOLE"/>
+        </root>
+
+        <!-- Auditoria em INFO sempre em prod -->
+        <logger name="com.experiencefieldops.api.services.impl.AuthServiceImpl" level="INFO"/>
+        <logger name="com.experiencefieldops.api.security.AccessDeniedAuditHandler" level="INFO"/>
+        <logger name="com.experiencefieldops.api.services.impl.SyncServiceImpl" level="INFO"/>
+    </springProfile>
+
+    <!-- ── Appender texto colorido (dev / default) ──────────────────────────── -->
+    <springProfile name="!prod">
+        <appender name="TEXT_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+                <pattern>%clr(%d{HH:mm:ss.SSS}){faint} %clr(%-5level) %clr(%-40.40logger{39}){cyan} : %msg%n</pattern>
+                <charset>UTF-8</charset>
+            </encoder>
+        </appender>
+
+        <root level="DEBUG">
+            <appender-ref ref="TEXT_CONSOLE"/>
+        </root>
+
+        <!-- Reduz verbosidade de frameworks em dev -->
+        <logger name="org.springframework" level="INFO"/>
+        <logger name="org.hibernate.SQL" level="DEBUG"/>
+        <logger name="org.hibernate.orm.jdbc.bind" level="TRACE"/>
+        <logger name="org.springframework.security" level="DEBUG"/>
+    </springProfile>
+
+</configuration>
