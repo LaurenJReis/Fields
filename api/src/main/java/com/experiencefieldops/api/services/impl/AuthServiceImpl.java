@@ -134,9 +134,9 @@ public class AuthServiceImpl implements AuthService {
             AuditLog entry = AuditLog.builder()
                     .actorId(actorId)
                     .actorName(actorName)
-                    .action(success ? AuditAction.LOGIN : AuditAction.LOGIN)
+                    .action(AuditAction.LOGIN)
                     .entityType("Auth")
-                    .entityId(actorId != null ? actorId : 0L)
+                    .entityId(actorId)
                     .details(details)
                     .ipAddress(ip)
                     .build();

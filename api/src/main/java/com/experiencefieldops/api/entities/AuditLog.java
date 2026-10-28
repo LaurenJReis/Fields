@@ -52,8 +52,8 @@ public class AuditLog {
     @Column(nullable = false, length = 50)
     private String entityType;
 
-    // ID do registro afetado
-    @Column(nullable = false)
+    // ID do registro afetado (nullable para eventos de sistema sem entidade, ex: tentativa de login com e-mail inválido)
+    @Column(nullable = true)
     private Long entityId;
 
     // Snapshot do estado anterior — campos sensíveis nunca incluídos (RN-007)
