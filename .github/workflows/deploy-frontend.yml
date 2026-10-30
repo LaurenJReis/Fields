@@ -1,0 +1,51 @@
+name: Deploy Frontend → AWS S3
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'Front/**'
+      - '.github/workflows/deploy-frontend.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: Front/package-lock.json
+
+      - name: Instalar dependências
+        run: npm ci
+        working-directory: Front
+
+      - name: Build de produção
+        run: npm run build
+        working-directory: Front
+        env:
+          VITE_API_URL: http://fieldops-api-prod.eba-pxu6drgm.us-east-2.elasticbeanstalk.com
+
+      - name: Configurar credenciais AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      - name: Deploy no S3
+        run: |
+          aws s3 sync Front/dist/ s3://${{ secrets.S3_FRONTEND_BUCKET }} \
+            --delete \
+            --cache-control "max-age=31536000,immutable" \
+            --exclude "index.html"
+          aws s3 cp Front/dist/index.html s3://${{ secrets.S3_FRONTEND_BUCKET }}/index.html \
+            --cache-control "no-cache,no-store,must-revalidate"
+          echo "✅ Frontend deployado!"
+          echo "URL: http://${{ secrets.S3_FRONTEND_BUCKET }}.s3-website.us-east-2.amazonaws.com"

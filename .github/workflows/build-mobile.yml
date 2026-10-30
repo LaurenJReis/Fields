@@ -1,0 +1,36 @@
+name: Build APK → EAS
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'Mobile_FieldOps/**'
+      - '.github/workflows/build-mobile.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: Mobile_FieldOps/package-lock.json
+
+      - name: Instalar EAS CLI
+        run: npm install -g eas-cli
+
+      - name: Instalar dependências
+        run: npm ci --legacy-peer-deps
+        working-directory: Mobile_FieldOps
+
+      - name: Build APK (EAS)
+        run: eas build --platform android --profile preview --non-interactive
+        working-directory: Mobile_FieldOps
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
