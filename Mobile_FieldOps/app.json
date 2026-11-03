@@ -10,19 +10,45 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.experiencefieldops.fieldops",
+      "versionCode": 1,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.RECORD_AUDIO"
+      ],
       "predictiveBackGestureEnabled": false
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-font"
-    ]
+      "expo-font",
+      [
+        "expo-camera",
+        {
+          "cameraPermissionText": "O FieldOps precisa de acesso à câmera para escanear QR codes e fotografar evidências das inspeções."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermissionText": "O FieldOps precisa de acesso à galeria para anexar fotos de evidências nas inspeções."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "d80fdebd-fb57-4466-9313-af9aa62da869"
+      }
+    },
+    "owner": "laurenreis1003"
   }
 }
