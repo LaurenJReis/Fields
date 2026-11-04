@@ -1,0 +1,71 @@
+name: Deploy API → AWS Elastic Beanstalk
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'fieldops/api/**'
+      - '.github/workflows/deploy-api.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build JAR
+        run: mvn package -DskipTests -q
+        working-directory: fieldops/api
+
+      - name: Criar Procfile
+        run: echo "web: java -Dspring.profiles.active=prod -Dserver.port=5000 -jar app.jar" > Procfile
+        working-directory: fieldops/api
+
+      - name: Criar ZIP para Elastic Beanstalk
+        run: |
+          mkdir -p deploy
+          cp target/*.jar deploy/app.jar
+          cp Procfile deploy/Procfile
+          cd deploy && zip -r ../../fieldops-api.zip .
+        working-directory: fieldops/api
+
+      - name: Configurar credenciais AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      - name: Upload ZIP para S3
+        run: |
+          VERSION="fieldops-api-${{ github.sha }}.zip"
+          aws s3 cp fieldops-api.zip s3://${{ secrets.EB_BUCKET }}/$VERSION
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Criar versão no Elastic Beanstalk
+        run: |
+          aws elasticbeanstalk create-application-version \
+            --application-name "${{ secrets.EB_APP_NAME }}" \
+            --version-label "${{ github.sha }}" \
+            --source-bundle S3Bucket="${{ secrets.EB_BUCKET }}",S3Key="${{ env.VERSION }}"
+
+      - name: Deploy no Elastic Beanstalk
+        run: |
+          aws elasticbeanstalk update-environment \
+            --environment-name "${{ secrets.EB_ENV_NAME }}" \
+            --version-label "${{ github.sha }}"
+
+      - name: Aguardar deploy
+        run: |
+          aws elasticbeanstalk wait environment-updated \
+            --environment-names "${{ secrets.EB_ENV_NAME }}"
+          echo "✅ API deployada com sucesso!"

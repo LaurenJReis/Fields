@@ -1,0 +1,63 @@
+{
+  "expo": {
+    "name": "FieldOps",
+    "slug": "FieldOps",
+    "version": "1.0.1",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.experiencefieldops.fieldops",
+      "infoPlist": {
+        "NSCameraUsageDescription": "O FieldOps precisa da câmera para escanear QR Codes de equipamentos e registrar evidências fotográficas das inspeções.",
+        "NSPhotoLibraryUsageDescription": "O FieldOps precisa acessar a galeria para anexar fotos como evidências de inspeção."
+      }
+    },
+    "android": {
+      "package": "com.experiencefieldops.fieldops",
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.INTERNET",
+        "android.permission.RECORD_AUDIO"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-font",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "O FieldOps precisa da câmera para escanear QR Codes de equipamentos e registrar evidências fotográficas.",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "O FieldOps precisa acessar suas fotos para anexar evidências às inspeções."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "d80fdebd-fb57-4466-9313-af9aa62da869"
+      }
+    },
+    "owner": "laurenreis1003"
+  }
+}
