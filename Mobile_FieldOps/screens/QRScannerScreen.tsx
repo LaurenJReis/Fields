@@ -184,11 +184,11 @@ const styles = StyleSheet.create({
   headerSpacer: { width: 30 },
 
   // Câmera — ocupa todo o espaço restante
-  camera: { ...StyleSheet.absoluteFillObject, top: 62 },
+  camera: { ...StyleSheet.absoluteFill, top: 62 },
 
   // Overlay escurecido ao redor da janela de scan
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     top: 62,
     flexDirection: 'column',
   },

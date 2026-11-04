@@ -1,8 +1,5 @@
-export interface User {
-  id: number;
-  name: string;
-  email: string;
-  password?: string; // enviado no POST, nunca armazenado localmente
-  role?: string;
-  organization?: string;
-}
+/**
+ * Re-exporta o tipo de usuário da API para compatibilidade
+ * com imports existentes (import { User } from '../types/user').
+ */
+export type { UserResponseApi as User } from './api';

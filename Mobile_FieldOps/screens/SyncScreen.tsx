@@ -1,151 +1,83 @@
 import {
+  useState,
+  useEffect,
+  useCallback,
+} from 'react';
+import {
   View,
   ScrollView,
   TouchableOpacity,
   StyleSheet,
   StatusBar,
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
 import {
+  Wifi,
   WifiOff,
   ClipboardList,
   RefreshCw,
   User,
   UploadCloud,
   CheckCircle2,
+  AlertCircle,
+  Clock,
 } from 'lucide-react-native';
 import { useNavigation } from '@react-navigation/native';
 import { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
+import NetInfo from '@react-native-community/netinfo';
 
 import AppText from '../components/AppText';
 import { MainTabParamList } from '../navigation/AppNavigator';
+import { useAuth } from '../context/AuthContext';
+import {
+  syncPendingOperations,
+  getOutboxSummary,
+  downloadInspections,
+  type OutboxSummary,
+} from '../services/syncEngine';
+import { getLocalInspections } from '../services/storage';
+import type { LocalInspection } from '../types/api';
+import { inspectionStatusLabel } from '../types/api';
 
 type SyncNavProp = BottomTabNavigationProp<MainTabParamList, 'Sincronizar'>;
 
 // ─────────────────────────────────────────────────────────────
-// Tipos de sincronização
+// Componente: card de inspeção com status de sync
 // ─────────────────────────────────────────────────────────────
 
-type SyncStatus = 'pending' | 'sent' | 'approved';
-
-interface SyncItem {
-  id: string;
-  code: string;
-  title: string;
-  sentAt?: string; // presente em 'sent' e 'approved'
-}
-
-// ─────────────────────────────────────────────────────────────
-// Dados mockados
-// ─────────────────────────────────────────────────────────────
-
-const PENDING_QUEUE: SyncItem[] = [
-  { id: 'q1', code: 'INSP-03', title: 'Inspeção estrutural - Lifter do Motor' },
-  { id: 'q2', code: 'INSP-02', title: 'Lubrificação dos rolamentos' },
-];
-
-const SENT_ITEMS: SyncItem[] = [
-  {
-    id: 's1',
-    code: 'INSP-01',
-    title: 'Inspeção estrutural - Lifter do Motor',
-    sentAt: '20/07/2026',
-  },
-  {
-    id: 's2',
-    code: 'INSP-01',
-    title: 'Inspeção estrutural - Lifter do Motor',
-    sentAt: '13/05/2026',
-  },
-];
-
-const APPROVED_ITEMS: SyncItem[] = [
-  {
-    id: 'a1',
-    code: 'INSP-01',
-    title: 'Inspeção estrutural - Lifter do Motor',
-    sentAt: '20/07/2026',
-  },
-  {
-    id: 'a2',
-    code: 'INSP-01',
-    title: 'Inspeção estrutural - Lifter do Motor',
-    sentAt: '09/03/2026',
-  },
-];
-
-// ─────────────────────────────────────────────────────────────
-// Componente: card da fila pendente
-// ─────────────────────────────────────────────────────────────
-
-function PendingCard({ item }: { item: SyncItem }) {
-  return (
-    <View style={styles.card}>
-      <View style={styles.cardRow}>
-        <View style={styles.cardInfo}>
-          <AppText style={styles.cardTitle}>{item.title}</AppText>
-          <AppText style={styles.cardCode}>{item.code}</AppText>
-        </View>
-        <UploadCloud size={24} color="#E65100" />
-      </View>
-    </View>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────
-// Componente: card de enviadas / aprovadas
-// ─────────────────────────────────────────────────────────────
-
-function SentCard({
-  item,
-  status,
+function InspectionSyncCard({
+  inspection,
+  summary,
 }: {
-  item: SyncItem;
-  status: 'sent' | 'approved';
+  inspection: LocalInspection;
+  summary: OutboxSummary;
 }) {
-  const isSent = status === 'sent';
+  const hasPending = summary.pending > 0 || summary.failed > 0;
+  const allSynced = summary.total > 0 && summary.pending === 0 && summary.failed === 0;
+
   return (
     <View style={styles.card}>
       <View style={styles.cardRow}>
         <View style={styles.cardInfo}>
-          <AppText style={styles.cardTitle}>{item.title}</AppText>
+          <AppText style={styles.cardTitle}>{inspection.title}</AppText>
           <AppText style={styles.cardCode}>
-            {item.code}
-            {'   '}
-            <AppText style={styles.cardSentDate}>
-              Enviado em: {item.sentAt}
-            </AppText>
+            {inspection.code} · {inspectionStatusLabel(inspection.status)}
           </AppText>
+          {summary.total > 0 && (
+            <AppText style={styles.cardSyncInfo}>
+              {summary.succeeded} ok · {summary.pending} pendentes · {summary.failed} falhas
+            </AppText>
+          )}
         </View>
-        {isSent ? (
-          <RefreshCw size={24} color="#7B6FC4" />
-        ) : (
+        {hasPending ? (
+          <UploadCloud size={24} color="#E65100" />
+        ) : allSynced ? (
           <CheckCircle2 size={24} color="#45A835" />
+        ) : (
+          <Clock size={24} color="#BDBDBD" />
         )}
       </View>
-    </View>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────
-// Componente: seção agrupada
-// ─────────────────────────────────────────────────────────────
-
-function SectionBlock({
-  title,
-  subtitle,
-  backgroundColor,
-  children,
-}: {
-  title: string;
-  subtitle: string;
-  backgroundColor: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <View style={[styles.section, { backgroundColor }]}>
-      <AppText style={styles.sectionTitle}>{title}</AppText>
-      <AppText style={styles.sectionSubtitle}>{subtitle}</AppText>
-      <View style={styles.sectionCards}>{children}</View>
     </View>
   );
 }
@@ -156,6 +88,72 @@ function SectionBlock({
 
 export default function SyncScreen() {
   const navigation = useNavigation<SyncNavProp>();
+  const { user } = useAuth();
+
+  const [isOnline, setIsOnline] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [inspections, setInspections] = useState<LocalInspection[]>([]);
+  const [summary, setSummary] = useState<OutboxSummary>({
+    pending: 0,
+    failed: 0,
+    succeeded: 0,
+    total: 0,
+  });
+
+  // Carrega dados locais
+  const loadData = useCallback(async () => {
+    const local = await getLocalInspections();
+    setInspections(local);
+    setSummary(await getOutboxSummary());
+  }, []);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  // Monitora rede
+  useEffect(() => {
+    const unsub = NetInfo.addEventListener((state) => {
+      setIsOnline(state.isConnected ?? false);
+    });
+    return () => unsub();
+  }, []);
+
+  // Sincroniza operações pendentes
+  const handleSync = useCallback(async () => {
+    if (!user) return;
+    setSyncing(true);
+    try {
+      const result = await syncPendingOperations(user.id);
+      await loadData();
+      const msg = `Sincronização concluída: ${result.succeeded} ok, ${result.failed} falhas, ${result.skipped} ignoradas, ${result.evidenceUploaded} evidências enviadas.`;
+      Alert.alert(result.failed > 0 ? 'Sincronização com falhas' : 'Sincronização concluída', msg);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erro na sincronização.';
+      Alert.alert('Erro', msg);
+    } finally {
+      setSyncing(false);
+    }
+  }, [user, loadData]);
+
+  // Download de inspeções
+  const handleDownload = useCallback(async () => {
+    if (!user) return;
+    setDownloading(true);
+    try {
+      const count = await downloadInspections(user.id);
+      await loadData();
+      Alert.alert('Download concluído', `${count} inspeção(ões) baixada(s).`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erro no download.';
+      Alert.alert('Falha', msg);
+    } finally {
+      setDownloading(false);
+    }
+  }, [user, loadData]);
+
+  const hasPending = summary.pending > 0 || summary.failed > 0;
 
   return (
     <View style={styles.container}>
@@ -168,8 +166,17 @@ export default function SyncScreen() {
           <AppText style={styles.headerBrandOps}>OPS</AppText>
         </AppText>
         <View style={styles.offlineContainer}>
-          <AppText style={styles.offlineText}>Modo Offline</AppText>
-          <WifiOff size={18} color="#E53935" style={styles.offlineIcon} />
+          {isOnline ? (
+            <>
+              <AppText style={styles.onlineText}>Online</AppText>
+              <Wifi size={18} color="#45A835" style={styles.offlineIcon} />
+            </>
+          ) : (
+            <>
+              <AppText style={styles.offlineText}>Modo Offline</AppText>
+              <WifiOff size={18} color="#E53935" style={styles.offlineIcon} />
+            </>
+          )}
         </View>
       </View>
 
@@ -177,9 +184,57 @@ export default function SyncScreen() {
       <View style={styles.titleSection}>
         <AppText style={styles.screenTitle}>Sincronização</AppText>
         <AppText style={styles.screenSubtitle}>
-          Sem conexão - conecte-se a internet para realizar a sincronização dos
-          arquivos
+          {isOnline
+            ? hasPending
+              ? `${summary.pending + summary.failed} operação(ões) pendente(s) para envio. Toque em "Sincronizar".`
+              : 'Tudo sincronizado. Nenhuma operação pendente.'
+            : 'Sem conexão. Conecte-se à internet para sincronizar as inspeções.'}
         </AppText>
+      </View>
+
+      {/* ── Botões de ação ──────────────────────────────── */}
+      <View style={styles.actionsRow}>
+        {isOnline && (
+          <TouchableOpacity
+            style={[styles.actionBtn, styles.actionBtnSecondary]}
+            onPress={handleDownload}
+            disabled={downloading}
+            activeOpacity={0.7}
+          >
+            {downloading ? (
+              <ActivityIndicator size={18} color="#45A835" />
+            ) : (
+              <ClipboardList size={18} color="#45A835" />
+            )}
+            <AppText style={styles.actionBtnSecondaryText}>
+              {downloading ? 'Baixando...' : 'Baixar inspeções'}
+            </AppText>
+          </TouchableOpacity>
+        )}
+
+        <TouchableOpacity
+          style={[
+            styles.actionBtn,
+            hasPending && isOnline ? styles.actionBtnPrimary : styles.actionBtnDisabled,
+          ]}
+          onPress={handleSync}
+          disabled={!isOnline || !hasPending || syncing}
+          activeOpacity={0.7}
+        >
+          {syncing ? (
+            <ActivityIndicator size={18} color="#FFFFFF" />
+          ) : (
+            <UploadCloud size={18} color={hasPending && isOnline ? '#FFFFFF' : '#BDBDBD'} />
+          )}
+          <AppText
+            style={[
+              styles.actionBtnPrimaryText,
+              !(hasPending && isOnline) && styles.actionBtnDisabledText,
+            ]}
+          >
+            {syncing ? 'Sincronizando...' : 'Sincronizar'}
+          </AppText>
+        </TouchableOpacity>
       </View>
 
       {/* ── Conteúdo rolável ────────────────────────────── */}
@@ -189,38 +244,69 @@ export default function SyncScreen() {
         showsVerticalScrollIndicator={false}
         overScrollMode="never"
       >
-        {/* Fila para sincronização */}
-        <SectionBlock
-          title="Fila para sincronização"
-          subtitle="Inspeções pendentes de envio"
-          backgroundColor="#FFF8E1"
-        >
-          {PENDING_QUEUE.map((item) => (
-            <PendingCard key={item.id} item={item} />
-          ))}
-        </SectionBlock>
+        {/* Resumo do outbox */}
+        <View style={[styles.section, { backgroundColor: '#FFF8E1' }]}>
+          <View style={styles.sectionHeader}>
+            <View>
+              <AppText style={styles.sectionTitle}>Fila de sincronização</AppText>
+              <AppText style={styles.sectionSubtitle}>
+                Operações aguardando envio ao servidor
+              </AppText>
+            </View>
+            <Clock size={24} color="#E65100" />
+          </View>
+          <View style={styles.summaryRow}>
+            <View style={styles.summaryItem}>
+              <AppText style={[styles.summaryNumber, { color: '#E65100' }]}>
+                {summary.pending}
+              </AppText>
+              <AppText style={styles.summaryLabel}>PENDENTES</AppText>
+            </View>
+            <View style={styles.summaryItem}>
+              <AppText style={[styles.summaryNumber, { color: '#E53935' }]}>
+                {summary.failed}
+              </AppText>
+              <AppText style={styles.summaryLabel}>FALHAS</AppText>
+            </View>
+            <View style={styles.summaryItem}>
+              <AppText style={[styles.summaryNumber, { color: '#45A835' }]}>
+                {summary.succeeded}
+              </AppText>
+              <AppText style={styles.summaryLabel}>ENVIADAS</AppText>
+            </View>
+          </View>
+        </View>
 
-        {/* Enviadas */}
-        <SectionBlock
-          title="Enviadas"
-          subtitle="Inspeções enviadas aguardando validação"
-          backgroundColor="#EDE7F6"
-        >
-          {SENT_ITEMS.map((item) => (
-            <SentCard key={item.id} item={item} status="sent" />
-          ))}
-        </SectionBlock>
-
-        {/* Aprovadas */}
-        <SectionBlock
-          title="Aprovadas"
-          subtitle="Inspeções sincronizadas e validadas"
-          backgroundColor="#E8F5E9"
-        >
-          {APPROVED_ITEMS.map((item) => (
-            <SentCard key={item.id} item={item} status="approved" />
-          ))}
-        </SectionBlock>
+        {/* Lista de inspeções */}
+        <View style={[styles.section, { backgroundColor: '#E8F5E9' }]}>
+          <View style={styles.sectionHeader}>
+            <View>
+              <AppText style={styles.sectionTitle}>Inspeções</AppText>
+              <AppText style={styles.sectionSubtitle}>
+                {inspections.length} inspeção(ões) no dispositivo
+              </AppText>
+            </View>
+            <CheckCircle2 size={24} color="#45A835" />
+          </View>
+          <View style={styles.sectionCards}>
+            {inspections.length === 0 ? (
+              <View style={styles.emptySync}>
+                <AlertCircle size={32} color="#BDBDBD" />
+                <AppText style={styles.emptySyncText}>
+                  Nenhuma inspeção baixada. Toque em "Baixar inspeções" quando estiver online.
+                </AppText>
+              </View>
+            ) : (
+              inspections.map((insp) => (
+                <InspectionSyncCard
+                  key={insp.id}
+                  inspection={insp}
+                  summary={summary}
+                />
+              ))
+            )}
+          </View>
+        </View>
       </ScrollView>
 
       {/* ── Barra de navegação inferior ─────────────────── */}
@@ -257,7 +343,6 @@ export default function SyncScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F4F4F4' },
 
-  // Header
   header: {
     backgroundColor: '#132539',
     flexDirection: 'row',
@@ -265,7 +350,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 20,
     paddingTop: 15,
-    paddingBottom: 25
+    paddingBottom: 25,
   },
   headerBrand: {},
   headerBrandField: {
@@ -284,9 +369,13 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontFamily: 'Inter_600SemiBold',
   },
+  onlineText: {
+    color: '#45A835',
+    fontSize: 13,
+    fontFamily: 'Inter_600SemiBold',
+  },
   offlineIcon: { marginLeft: 4 },
 
-  // Título
   titleSection: {
     backgroundColor: '#132539',
     paddingHorizontal: 20,
@@ -306,14 +395,58 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
 
-  // Scroll
+  actionsRow: {
+    flexDirection: 'row',
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingTop: 16,
+  },
+  actionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderRadius: 8,
+    paddingVertical: 12,
+    flex: 1,
+  },
+  actionBtnPrimary: {
+    backgroundColor: '#45A835',
+  },
+  actionBtnSecondary: {
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1.5,
+    borderColor: '#45A835',
+  },
+  actionBtnDisabled: {
+    backgroundColor: '#E0E0E0',
+  },
+  actionBtnPrimaryText: {
+    fontSize: 14,
+    fontFamily: 'Inter_700Bold',
+    color: '#FFFFFF',
+  },
+  actionBtnSecondaryText: {
+    fontSize: 14,
+    fontFamily: 'Inter_700Bold',
+    color: '#45A835',
+  },
+  actionBtnDisabledText: {
+    color: '#BDBDBD',
+  },
+
   scroll: { flex: 1 },
   scrollContent: { padding: 16, gap: 16, paddingTop: 16 },
 
-  // Seção
   section: {
     borderRadius: 8,
     padding: 16,
+  },
+  sectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 12,
   },
   sectionTitle: {
     fontSize: 18,
@@ -325,11 +458,31 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: 'Inter_400Regular',
     color: '#666',
-    marginBottom: 12,
   },
   sectionCards: { gap: 10 },
 
-  // Card
+  summaryRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  summaryItem: {
+    flex: 1,
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 6,
+    paddingVertical: 12,
+  },
+  summaryNumber: {
+    fontSize: 20,
+    fontFamily: 'Inter_700Bold',
+  },
+  summaryLabel: {
+    fontSize: 9,
+    fontFamily: 'Inter_400Regular',
+    color: '#666',
+    marginTop: 2,
+  },
+
   card: {
     backgroundColor: '#FFFFFF',
     borderRadius: 6,
@@ -358,13 +511,25 @@ const styles = StyleSheet.create({
     fontFamily: 'Inter_400Regular',
     color: '#666',
   },
-  cardSentDate: {
-    fontSize: 12,
+  cardSyncInfo: {
+    fontSize: 11,
     fontFamily: 'Inter_400Regular',
     color: '#888',
+    marginTop: 2,
   },
 
-  // Tab Bar
+  emptySync: {
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 20,
+  },
+  emptySyncText: {
+    fontSize: 13,
+    color: '#BDBDBD',
+    fontFamily: 'Inter_400Regular',
+    textAlign: 'center',
+  },
+
   tabBar: {
     flexDirection: 'row',
     backgroundColor: '#FFFFFF',

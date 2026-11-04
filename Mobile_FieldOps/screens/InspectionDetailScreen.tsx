@@ -138,7 +138,7 @@ export default function InspectionDetailScreen() {
             <MapPin size={16} color="#555" />
             <View style={styles.infoTextGroup}>
               <AppText style={styles.infoLabel}>Local</AppText>
-              <AppText style={styles.infoValue}>{inspection.location}</AppText>
+              <AppText style={styles.infoValue}>{inspection.area}</AppText>
             </View>
           </View>
         </View>

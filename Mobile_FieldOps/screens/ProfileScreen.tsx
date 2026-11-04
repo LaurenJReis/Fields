@@ -74,8 +74,12 @@ export default function ProfileScreen() {
 
   // Fallback para quando o usuário ainda não estiver carregado
   const displayName = user?.name ?? '—';
-  const displayRole = user?.role ?? '';
-  const displayOrg = user?.organization ?? '—';
+  const roleLabels: Record<string, string> = {
+    ADMIN: 'Administrador',
+    SUPERVISOR: 'Supervisor',
+    TECNICO: 'Técnico',
+  };
+  const displayRole = user?.role ? roleLabels[user.role] ?? user.role : '';
   const initials = user?.name ? getInitials(user.name) : '?';
 
   // Observação: o Alert.alert do react-native-web é um stub vazio (no-op),
@@ -151,7 +155,7 @@ export default function ProfileScreen() {
           <MenuItem
             icon={<Building2 size={22} color="#555" />}
             label="Organização"
-            subtitle={displayOrg}
+            subtitle="FieldOps"
             isFirst
           />
           <MenuItem

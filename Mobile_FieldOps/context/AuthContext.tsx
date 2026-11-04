@@ -6,56 +6,53 @@ import {
   useCallback,
   ReactNode,
 } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
-import { User } from '../types/user';
+import { login as apiLogin } from '../services/apiClient';
+import {
+  saveAuth,
+  getAuth,
+  clearAuth,
+  clearAllLocalData,
+} from '../services/storage';
+import type { LoginResponseApi, UserResponseApi } from '../types/api';
 
-// ─── Mock de teste (offline) ────────────────────────────────────────────────
-// Credenciais fixas para testar o fluxo de login sem backend.
-// Remova este bloco e restaure a chamada a getAllUsers() ao voltar para a API.
-const MOCK_USER: User = {
-  id: 1,
-  name: 'Admin Teste',
-  email: 'admin@fieldops.com',
-  role: 'inspetor',
-  organization: 'FieldOps',
-};
-const MOCK_PASSWORD = '123456';
-
-// ─── Tipos ───────────────────────────────────────────────────────────────────
+// ─── Tipos ───────────────────────────────────────────────────────
 
 interface AuthContextValue {
   /** Usuário atualmente logado, ou null se não autenticado. */
-  user: User | null;
+  user: UserResponseApi | null;
+  /** Token JWT da sessão atual. */
+  token: string | null;
   /** true enquanto verifica a sessão salva no storage na inicialização. */
   loading: boolean;
   /**
-   * Autentica pelo e-mail + senha (mock offline para testes).
-   * `persist` (Lembrar-me) define se a sessão é gravada no AsyncStorage e
-   * restaurada na próxima abertura do app.
+   * Autentica pelo e-mail + senha via API.
+   * `persist` (Lembrar-me) define se a sessão é gravada no AsyncStorage.
    */
   login: (email: string, password: string, persist: boolean) => Promise<void>;
   /** Remove a sessão local e desloga o usuário. */
   logout: () => Promise<void>;
 }
 
-// ─── Context ─────────────────────────────────────────────────────────────────
+// ─── Context ──────────────────────────────────────────────────────
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-const STORAGE_KEY = '@fieldops:user';
-
-// ─── Provider ────────────────────────────────────────────────────────────────
+// ─── Provider ────────────────────────────────────────────────────
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<UserResponseApi | null>(null);
+  const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   // Restaura sessão persistida ao abrir o app
   useEffect(() => {
-    AsyncStorage.getItem(STORAGE_KEY)
-      .then((raw) => {
-        if (raw) setUser(JSON.parse(raw) as User);
+    getAuth()
+      .then((auth) => {
+        if (auth) {
+          setToken(auth.token);
+          setUser(auth.user);
+        }
       })
       .catch(() => {
         // storage corrompido: ignora e segue sem sessão
@@ -64,48 +61,40 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   /**
-   * Login mockado para testes offline.
-   * Compara e-mail + senha contra credenciais fixas (MOCK_USER / MOCK_PASSWORD).
-   * `persist` controla se a sessão é gravada no AsyncStorage (Lembrar-me):
-   * quando false, remove qualquer sessão antiga, garantindo que o app abra
-   * sempre no login na próxima vez.
-   * Troque de volta por getAllUsers() quando o backend estiver disponível.
+   * Login real via API.
+   * Envia credenciais para /api/auth/login e armazena o JWT + usuário.
+   * `persist` controla se a sessão é gravada no AsyncStorage (Lembrar-me).
    */
   const login = useCallback(
     async (email: string, password: string, persist: boolean) => {
-      const emailOk =
-        email.trim().toLowerCase() === MOCK_USER.email.toLowerCase();
-      const passOk = password === MOCK_PASSWORD;
-
-      if (!emailOk || !passOk) {
-        throw new Error('E-mail ou senha incorretos.');
-      }
+      const auth: LoginResponseApi = await apiLogin(email, password);
 
       if (persist) {
-        await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(MOCK_USER));
-      } else {
-        // Limpa qualquer sessão anterior para que o app não autologue
-        // quando o usuário optou por não "Lembrar-me".
-        await AsyncStorage.removeItem(STORAGE_KEY);
+        await saveAuth(auth);
       }
-      setUser(MOCK_USER);
+      // Sempre guarda em memória para a sessão atual
+      setToken(auth.token);
+      setUser(auth.user);
     },
     [],
   );
 
   const logout = useCallback(async () => {
-    await AsyncStorage.removeItem(STORAGE_KEY);
+    await clearAuth();
+    // Limpa dados locais de inspeções/respostas/outbox ao deslogar
+    await clearAllLocalData();
+    setToken(null);
     setUser(null);
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout }}>
+    <AuthContext.Provider value={{ user, token, loading, login, logout }}>
       {children}
     </AuthContext.Provider>
   );
 }
 
-// ─── Hook ────────────────────────────────────────────────────────────────────
+// ─── Hook ────────────────────────────────────────────────────────
 
 export function useAuth(): AuthContextValue {
   const ctx = useContext(AuthContext);

@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View,
   ScrollView,
@@ -9,12 +9,12 @@ import {
   KeyboardAvoidingView,
   Platform,
   Image,
+  Alert,
 } from 'react-native';
 import {
   ArrowLeft,
   ArrowRight,
   Smile,
-  Meh,
   Frown,
   XCircle,
   Camera,
@@ -23,19 +23,28 @@ import {
   X,
   CheckCircle2,
   Circle,
+  HelpCircle,
 } from 'lucide-react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import * as ImagePicker from 'expo-image-picker';
 
 import AppText from '../components/AppText';
-import {
-  MOCK_CHECKLIST,
-  ChecklistItem,
-  ChecklistAnswer,
-  ChecklistEvidence,
-} from '../data/inspections';
 import { RootStackParamList } from '../navigation/AppNavigator';
+import {
+  getLocalInspection,
+  getLocalResponses,
+  upsertLocalResponse,
+} from '../services/storage';
+import { enqueueInspection } from '../services/syncEngine';
+import type {
+  LocalInspection,
+  LocalResponse,
+  LocalEvidence,
+  InspectionItemSnapshotApi,
+  ChecklistItemTypeLocal,
+} from '../types/api';
+import { responseTypeToLocal, uuidv4 } from '../types/api';
 
 // ─────────────────────────────────────────────────────────────
 // Tipos de navegação
@@ -45,15 +54,179 @@ type ExecRouteProp = RouteProp<RootStackParamList, 'ChecklistExecution'>;
 type ExecNavProp = NativeStackNavigationProp<RootStackParamList>;
 
 // ─────────────────────────────────────────────────────────────
+// Tipo de item de checklist para a UI
+// ─────────────────────────────────────────────────────────────
+
+interface UiChecklistItem {
+  snapshotId: number;
+  order: number;
+  title: string;
+  description: string;
+  type: ChecklistItemTypeLocal;
+  required: boolean;
+  choices: string[];
+  requiresEvidence: boolean;
+  // Estado da resposta
+  answer: string | null; // CONFORMITY label
+  textAnswer: string;
+  numberAnswer: string;
+  booleanAnswer: boolean | null;
+  choiceAnswer: string;
+  dateAnswer: string;
+  evidences: LocalEvidence[];
+  observation: string;
+}
+
+// ─────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────
 
-/** Retorna true se o item está respondido (qualquer tipo). */
-function isAnswered(item: ChecklistItem): boolean {
+/** Converte um snapshot da API para o formato usado na UI. */
+function snapshotToUiItem(
+  snap: InspectionItemSnapshotApi,
+  existingResponse?: LocalResponse,
+): UiChecklistItem {
+  // Parse choices from optionsJson
+  let choices: string[] = [];
+  if (snap.optionsJson) {
+    try {
+      const parsed = JSON.parse(snap.optionsJson);
+      if (Array.isArray(parsed)) {
+        choices = parsed.map(String);
+      } else if (parsed.options && Array.isArray(parsed.options)) {
+        choices = parsed.options.map(String);
+      }
+    } catch {
+      // optionsJson não é JSON válido, ignora
+    }
+  }
+
+  const resp = existingResponse;
+  const type = responseTypeToLocal(snap.responseType);
+
+  // Reconstrói o answer da UI a partir da resposta salva
+  let answer: string | null = null;
+  let textAnswer = '';
+  let numberAnswer = '';
+  let booleanAnswer: boolean | null = null;
+  let choiceAnswer = '';
+  let dateAnswer = '';
+  let observation = '';
+  let evidences: LocalEvidence[] = [];
+
+  if (resp) {
+    observation = resp.observation ?? '';
+    evidences = resp.evidences ?? [];
+
+    if (type === 'CONFORMITY') {
+      // Mapeia valor da API de volta para rótulo da UI
+      if (resp.notApplicable) {
+        answer = 'Não Aplicável';
+      } else if (resp.value === 'CONFORMING') {
+        answer = 'Conforme';
+      } else if (resp.value === 'NON_CONFORMING') {
+        answer = 'Inconforme';
+      }
+    } else if (type === 'BOOLEAN') {
+      booleanAnswer = resp.value === 'true';
+    } else if (type === 'NUMBER') {
+      numberAnswer = resp.value ?? '';
+    } else if (type === 'TEXT' || type === 'TEXT_LONG') {
+      textAnswer = resp.value ?? '';
+    } else if (type === 'CHOICE') {
+      choiceAnswer = resp.value ?? '';
+    } else if (type === 'DATE') {
+      // Converte yyyy-MM-dd de volta para DD/MM/AAAA
+      if (resp.value) {
+        const m = resp.value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        if (m) {
+          dateAnswer = `${m[3]}/${m[2]}/${m[1]}`;
+        } else {
+          dateAnswer = resp.value;
+        }
+      }
+    }
+  }
+
+  return {
+    snapshotId: snap.id,
+    order: snap.itemDisplayOrder,
+    title: snap.title,
+    description: snap.description,
+    type,
+    required: snap.required,
+    choices,
+    requiresEvidence: snap.evidenceRequiredOnFailure,
+    answer,
+    textAnswer,
+    numberAnswer,
+    booleanAnswer,
+    choiceAnswer,
+    dateAnswer,
+    evidences,
+    observation,
+  };
+}
+
+/** Converte o estado da UI de um item para LocalResponse. */
+function uiItemToResponse(item: UiChecklistItem): LocalResponse {
+  let value: string | null = null;
+  let notApplicable = false;
+
+  switch (item.type) {
+    case 'CONFORMITY':
+      if (item.answer === 'Não Aplicável') {
+        notApplicable = true;
+        value = null;
+      } else if (item.answer === 'Conforme') {
+        value = 'CONFORMING';
+      } else if (item.answer === 'Inconforme') {
+        value = 'NON_CONFORMING';
+      }
+      break;
+    case 'BOOLEAN':
+      value = item.booleanAnswer === null ? null : String(item.booleanAnswer);
+      break;
+    case 'NUMBER':
+      value = item.numberAnswer || null;
+      break;
+    case 'TEXT':
+    case 'TEXT_LONG':
+      value = item.textAnswer || null;
+      break;
+    case 'CHOICE':
+      value = item.choiceAnswer || null;
+      break;
+    case 'DATE':
+      // Converte DD/MM/AAAA → yyyy-MM-dd
+      if (item.dateAnswer) {
+        const m = item.dateAnswer.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+        if (m) {
+          value = `${m[3]}-${m[2]}-${m[1]}`;
+        } else {
+          value = item.dateAnswer;
+        }
+      }
+      break;
+  }
+
+  return {
+    snapshotItemId: item.snapshotId,
+    value,
+    observation: item.observation || null,
+    notApplicable,
+    evidences: item.evidences,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/** Retorna true se o item está respondido. */
+function isAnswered(item: UiChecklistItem): boolean {
   switch (item.type) {
     case 'CONFORMITY':
       return item.answer !== null;
     case 'TEXT':
+    case 'TEXT_LONG':
       return item.textAnswer.trim().length > 0;
     case 'NUMBER':
       return item.numberAnswer.trim().length > 0;
@@ -63,50 +236,43 @@ function isAnswered(item: ChecklistItem): boolean {
       return item.choiceAnswer.trim().length > 0;
     case 'DATE':
       return item.dateAnswer.trim().length > 0;
-    case 'PHOTO':
-      return item.evidences.length > 0;
     default:
       return false;
   }
 }
 
-/** Retorna true se o item obrigatório ainda não foi respondido. */
-function isMissingRequired(item: ChecklistItem): boolean {
+function isMissingRequired(item: UiChecklistItem): boolean {
   return item.required && !isAnswered(item);
 }
 
 // Cores de destaque por resposta de conformidade
-const CONFORMITY_COLORS: Record<NonNullable<ChecklistAnswer>, { border: string; bg: string; label: string }> = {
-  Conforme:        { border: '#45A835', bg: '#F0FAF0', label: '#2E7D32' },
-  Atenção:         { border: '#FFA000', bg: '#FFFDE7', label: '#E65100' },
-  Inconforme:      { border: '#E53935', bg: '#FFEBEE', label: '#B71C1C' },
-  'Não verificado':{ border: '#9E9E9E', bg: '#F5F5F5', label: '#555' },
+const CONFORMITY_COLORS: Record<string, { border: string; bg: string; label: string }> = {
+  Conforme: { border: '#45A835', bg: '#F0FAF0', label: '#2E7D32' },
+  Inconforme: { border: '#E53935', bg: '#FFEBEE', label: '#B71C1C' },
+  'Não Aplicável': { border: '#9E9E9E', bg: '#F5F5F5', label: '#555' },
 };
 
 // ─────────────────────────────────────────────────────────────
 // Sub-componentes de input por tipo
 // ─────────────────────────────────────────────────────────────
 
-// ── CONFORMITY ──────────────────────────────────────────────
-
 interface ConformityProps {
-  item: ChecklistItem;
-  onAnswer: (a: ChecklistAnswer) => void;
+  item: UiChecklistItem;
+  onAnswer: (a: string) => void;
 }
 
 function ConformityInput({ item, onAnswer }: ConformityProps) {
-  const OPTIONS: { value: ChecklistAnswer; label: string; icon: React.ReactNode }[] = [
-    { value: 'Conforme',        label: 'Conforme',        icon: <Smile   size={26} color="#132539" strokeWidth={1.5} /> },
-    { value: 'Atenção',         label: 'Atenção',         icon: <Meh     size={26} color="#132539" strokeWidth={1.5} /> },
-    { value: 'Inconforme',      label: 'Inconforme',      icon: <Frown   size={26} color="#132539" strokeWidth={1.5} /> },
-    { value: 'Não verificado',  label: 'Não verificado',  icon: <XCircle size={26} color="#132539" strokeWidth={1.5} /> },
+  const OPTIONS: { value: string; label: string; icon: React.ReactNode }[] = [
+    { value: 'Conforme', label: 'Conforme', icon: <Smile size={26} color="#132539" strokeWidth={1.5} /> },
+    { value: 'Inconforme', label: 'Inconforme', icon: <Frown size={26} color="#132539" strokeWidth={1.5} /> },
+    { value: 'Não Aplicável', label: 'Não Aplicável', icon: <XCircle size={26} color="#132539" strokeWidth={1.5} /> },
   ];
 
   return (
     <View style={inputStyles.group}>
       {OPTIONS.map((opt) => {
         const sel = item.answer === opt.value;
-        const colors = opt.value ? CONFORMITY_COLORS[opt.value] : null;
+        const colors = CONFORMITY_COLORS[opt.value];
         return (
           <TouchableOpacity
             key={opt.value}
@@ -136,8 +302,6 @@ function ConformityInput({ item, onAnswer }: ConformityProps) {
     </View>
   );
 }
-
-// ── BOOLEAN ─────────────────────────────────────────────────
 
 interface BooleanProps {
   value: boolean | null;
@@ -181,8 +345,6 @@ function BooleanInput({ value, onChange }: BooleanProps) {
   );
 }
 
-// ── NUMBER ──────────────────────────────────────────────────
-
 interface NumberProps {
   value: string;
   onChange: (v: string) => void;
@@ -202,19 +364,18 @@ function NumberInput({ value, onChange }: NumberProps) {
   );
 }
 
-// ── TEXT ────────────────────────────────────────────────────
-
 interface TextProps {
   value: string;
   onChange: (v: string) => void;
+  multiline?: boolean;
   placeholder?: string;
 }
 
-function TextAreaInput({ value, onChange, placeholder = '' }: TextProps) {
+function TextAreaInput({ value, onChange, multiline, placeholder = '' }: TextProps) {
   return (
     <TextInput
-      style={[inputStyles.textBox, inputStyles.textArea]}
-      multiline
+      style={[inputStyles.textBox, multiline && inputStyles.textArea]}
+      multiline={multiline}
       textAlignVertical="top"
       placeholder={placeholder}
       placeholderTextColor="#BDBDBD"
@@ -225,15 +386,12 @@ function TextAreaInput({ value, onChange, placeholder = '' }: TextProps) {
   );
 }
 
-// ── DATE ────────────────────────────────────────────────────
-
 interface DateProps {
   value: string;
   onChange: (v: string) => void;
 }
 
 function DateInput({ value, onChange }: DateProps) {
-  // Máscara simples dd/mm/aaaa
   function mask(raw: string) {
     const d = raw.replace(/\D/g, '').slice(0, 8);
     if (d.length <= 2) return d;
@@ -253,8 +411,6 @@ function DateInput({ value, onChange }: DateProps) {
     />
   );
 }
-
-// ── CHOICE ──────────────────────────────────────────────────
 
 interface ChoiceProps {
   choices: string[];
@@ -294,12 +450,10 @@ function ChoiceInput({ choices, value, onChange }: ChoiceProps) {
   );
 }
 
-// ── PHOTO / EVIDENCE ────────────────────────────────────────
-
 interface PhotoProps {
-  evidences: ChecklistEvidence[];
+  evidences: LocalEvidence[];
   requiresEvidence?: boolean;
-  onAdd: (ev: ChecklistEvidence) => void;
+  onAdd: (ev: LocalEvidence) => void;
   onRemove: (uri: string) => void;
 }
 
@@ -311,9 +465,11 @@ function PhotoInput({ evidences, requiresEvidence, onAdd, onRemove }: PhotoProps
     });
     if (!result.canceled && result.assets[0]) {
       onAdd({
+        id: uuidv4(),
         uri: result.assets[0].uri,
         source: 'camera',
         capturedAt: new Date().toISOString(),
+        synced: false,
       });
     }
   }
@@ -327,9 +483,11 @@ function PhotoInput({ evidences, requiresEvidence, onAdd, onRemove }: PhotoProps
     });
     if (!result.canceled && result.assets[0]) {
       onAdd({
+        id: uuidv4(),
         uri: result.assets[0].uri,
         source: 'gallery',
         capturedAt: new Date().toISOString(),
+        synced: false,
       });
     }
   }
@@ -338,7 +496,6 @@ function PhotoInput({ evidences, requiresEvidence, onAdd, onRemove }: PhotoProps
 
   return (
     <View>
-      {/* Aviso quando evidência é obrigatória e ausente */}
       {missing && (
         <View style={inputStyles.evidenceWarning}>
           <AlertCircle size={16} color="#E53935" />
@@ -348,7 +505,6 @@ function PhotoInput({ evidences, requiresEvidence, onAdd, onRemove }: PhotoProps
         </View>
       )}
 
-      {/* Botões câmera / galeria */}
       <View style={inputStyles.evidenceBtns}>
         <TouchableOpacity
           style={[inputStyles.evidenceBtn, missing && inputStyles.evidenceBtnRequired]}
@@ -375,7 +531,6 @@ function PhotoInput({ evidences, requiresEvidence, onAdd, onRemove }: PhotoProps
         </TouchableOpacity>
       </View>
 
-      {/* Pré-visualização das evidências anexadas */}
       {evidences.length > 0 && (
         <ScrollView
           horizontal
@@ -384,8 +539,13 @@ function PhotoInput({ evidences, requiresEvidence, onAdd, onRemove }: PhotoProps
           contentContainerStyle={inputStyles.previewContent}
         >
           {evidences.map((ev) => (
-            <View key={ev.uri} style={inputStyles.previewThumb}>
+            <View key={ev.id} style={inputStyles.previewThumb}>
               <Image source={{ uri: ev.uri }} style={inputStyles.previewImg} />
+              {ev.synced && (
+                <View style={inputStyles.syncedBadge}>
+                  <CheckCircle2 size={12} color="#45A835" />
+                </View>
+              )}
               <TouchableOpacity
                 style={inputStyles.previewRemove}
                 onPress={() => onRemove(ev.uri)}
@@ -409,28 +569,64 @@ export default function ChecklistExecutionScreen() {
   const navigation = useNavigation<ExecNavProp>();
   const route = useRoute<ExecRouteProp>();
   const { inspectionId } = route.params;
+  const inspectionIdNum = Number(inspectionId);
 
-  const [items, setItems] = useState<ChecklistItem[]>(
-    () => MOCK_CHECKLIST[inspectionId] ?? [],
-  );
+  const [items, setItems] = useState<UiChecklistItem[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
-  // Exibe aviso de obrigatório se o usuário tentar avançar sem responder
   const [showRequired, setShowRequired] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [inspection, setInspection] = useState<LocalInspection | null>(null);
 
   const scrollRef = useRef<ScrollView>(null);
 
-  const total = items.length;
-  const item = items[currentIndex];
+  // Carrega inspeção e respostas do storage local
+  useEffect(() => {
+    (async () => {
+      const insp = await getLocalInspection(inspectionIdNum);
+      if (!insp) {
+        setLoading(false);
+        return;
+      }
+      setInspection(insp);
 
-  // ── Updaters ──────────────────────────────────────────────
+      const responses = await getLocalResponses(inspectionIdNum);
 
-  function updateItem(patch: Partial<ChecklistItem>) {
-    setItems((prev) =>
-      prev.map((it, idx) => (idx === currentIndex ? { ...it, ...patch } : it)),
-    );
+      // Ordena snapshots por itemDisplayOrder e converte para UI
+      const sorted = [...insp.itemSnapshots].sort(
+        (a, b) => a.itemDisplayOrder - b.itemDisplayOrder,
+      );
+      const uiItems = sorted.map((snap) =>
+        snapshotToUiItem(snap, responses[snap.id]),
+      );
+
+      setItems(uiItems);
+      setLoading(false);
+    })();
+  }, [inspectionIdNum]);
+
+  // Salva a resposta do item atual no storage local
+  const persistResponse = useCallback(
+    (item: UiChecklistItem) => {
+      const response = uiItemToResponse(item);
+      upsertLocalResponse(inspectionIdNum, item.snapshotId, response);
+    },
+    [inspectionIdNum],
+  );
+
+  // ── Updaters (salvam no storage a cada mudança) ──────────
+
+  function updateItem(patch: Partial<UiChecklistItem>) {
+    setItems((prev) => {
+      const updated = prev.map((it, idx) =>
+        idx === currentIndex ? { ...it, ...patch } : it,
+      );
+      // Persiste o item atualizado
+      persistResponse(updated[currentIndex]);
+      return updated;
+    });
   }
 
-  const handleAnswer    = useCallback((answer: ChecklistAnswer) => updateItem({ answer }), [currentIndex]);
+  const handleAnswer    = useCallback((answer: string) => updateItem({ answer }), [currentIndex]);
   const handleText      = useCallback((textAnswer: string) => updateItem({ textAnswer }), [currentIndex]);
   const handleNumber    = useCallback((numberAnswer: string) => updateItem({ numberAnswer }), [currentIndex]);
   const handleBoolean   = useCallback((booleanAnswer: boolean) => updateItem({ booleanAnswer }), [currentIndex]);
@@ -438,24 +634,28 @@ export default function ChecklistExecutionScreen() {
   const handleDate      = useCallback((dateAnswer: string) => updateItem({ dateAnswer }), [currentIndex]);
   const handleObs       = useCallback((observation: string) => updateItem({ observation }), [currentIndex]);
 
-  const handleAddEvidence = useCallback((ev: ChecklistEvidence) => {
-    setItems((prev) =>
-      prev.map((it, idx) =>
+  const handleAddEvidence = useCallback((ev: LocalEvidence) => {
+    setItems((prev) => {
+      const updated = prev.map((it, idx) =>
         idx === currentIndex
           ? { ...it, evidences: [...it.evidences, ev] }
           : it,
-      ),
-    );
+      );
+      persistResponse(updated[currentIndex]);
+      return updated;
+    });
   }, [currentIndex]);
 
   const handleRemoveEvidence = useCallback((uri: string) => {
-    setItems((prev) =>
-      prev.map((it, idx) =>
+    setItems((prev) => {
+      const updated = prev.map((it, idx) =>
         idx === currentIndex
           ? { ...it, evidences: it.evidences.filter((e) => e.uri !== uri) }
           : it,
-      ),
-    );
+      );
+      persistResponse(updated[currentIndex]);
+      return updated;
+    });
   }, [currentIndex]);
 
   // ── Navegação ─────────────────────────────────────────────
@@ -471,7 +671,6 @@ export default function ChecklistExecutionScreen() {
   }
 
   function goNext() {
-    // Bloqueia se obrigatório não respondido
     if (isMissingRequired(items[currentIndex])) {
       setShowRequired(true);
       return;
@@ -482,16 +681,42 @@ export default function ChecklistExecutionScreen() {
       setCurrentIndex((i) => i + 1);
       scrollRef.current?.scrollTo({ y: 0, animated: false });
     } else {
-      // TODO: submeter checklist ao backend
-      navigation.goBack();
+      // Finaliza: enfileira operações de sync no outbox local
+      finishInspection();
+    }
+  }
+
+  async function finishInspection() {
+    try {
+      await enqueueInspection(inspectionIdNum);
+      Alert.alert(
+        'Inspeção finalizada',
+        'As respostas foram salvas localmente e serão sincronizadas quando houver conexão.',
+        [{ text: 'OK', onPress: () => navigation.goBack() }],
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erro ao finalizar.';
+      Alert.alert('Erro', msg, [{ text: 'OK', onPress: () => navigation.goBack() }]);
     }
   }
 
   // ── Guard ─────────────────────────────────────────────────
 
+  if (loading) {
+    return (
+      <View style={styles.notFound}>
+        <AppText style={styles.notFoundText}>Carregando inspeção...</AppText>
+      </View>
+    );
+  }
+
+  const total = items.length;
+  const item = items[currentIndex];
+
   if (!item) {
     return (
       <View style={styles.notFound}>
+        <HelpCircle size={48} color="#BDBDBD" />
         <AppText style={styles.notFoundText}>
           Nenhum item de inspeção encontrado.
         </AppText>
@@ -502,11 +727,9 @@ export default function ChecklistExecutionScreen() {
     );
   }
 
-  // Progresso visual (barra no header)
-  const progressPct = Math.round(((currentIndex) / total) * 100);
+  const progressPct = Math.round((currentIndex / total) * 100);
 
-  // Se Inconforme e requiresEvidence, forçar evidência mesmo que ainda não
-  // esteja marcado como requiresEvidence no dado — boa prática do card
+  // Se Inconforme e requiresEvidence, forçar evidência
   const needsEvidence =
     item.requiresEvidence ||
     (item.type === 'CONFORMITY' && item.answer === 'Inconforme');
@@ -539,7 +762,6 @@ export default function ChecklistExecutionScreen() {
         <View style={styles.headerSpacer} />
       </View>
 
-      {/* Barra de progresso */}
       <View style={styles.progressTrack}>
         <View style={[styles.progressFill, { width: `${progressPct}%` }]} />
       </View>
@@ -552,16 +774,13 @@ export default function ChecklistExecutionScreen() {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-        {/* Número + título */}
         <AppText style={styles.itemTitle}>
           {item.order}. {item.title}
           {item.required ? <AppText style={styles.requiredMark}> *</AppText> : null}
         </AppText>
 
-        {/* Descrição */}
         <AppText style={styles.itemDescription}>{item.description}</AppText>
 
-        {/* Aviso de campo obrigatório não preenchido */}
         {missingRequired && (
           <View style={styles.requiredWarning}>
             <AlertCircle size={15} color="#E53935" />
@@ -589,22 +808,25 @@ export default function ChecklistExecutionScreen() {
           <TextAreaInput value={item.textAnswer} onChange={handleText} placeholder="Descreva aqui..." />
         )}
 
+        {item.type === 'TEXT_LONG' && (
+          <TextAreaInput value={item.textAnswer} onChange={handleText} multiline placeholder="Descreva aqui em detalhes..." />
+        )}
+
         {item.type === 'DATE' && (
           <DateInput value={item.dateAnswer} onChange={handleDate} />
         )}
 
         {item.type === 'CHOICE' && (
           <ChoiceInput
-            choices={item.choices ?? []}
+            choices={item.choices}
             value={item.choiceAnswer}
             onChange={handleChoice}
           />
         )}
 
-        {/* PHOTO sozinho, mas qualquer tipo pode ter evidência extra */}
-        {(item.type === 'PHOTO' || needsEvidence) && (
+        {(needsEvidence || item.evidences.length > 0) && (
           <>
-            {item.type !== 'PHOTO' && (
+            {item.type !== 'CONFORMITY' && (
               <AppText style={styles.evidenceTitle}>Evidências:</AppText>
             )}
             <PhotoInput
@@ -616,7 +838,7 @@ export default function ChecklistExecutionScreen() {
           </>
         )}
 
-        {/* Campo de observação — presente em todos os tipos */}
+        {/* Campo de observação */}
         <AppText style={styles.observationLabel}>Campo de observação:</AppText>
         <TextInput
           style={styles.observationInput}
@@ -648,7 +870,7 @@ export default function ChecklistExecutionScreen() {
           style={styles.footerBtn}
           onPress={goNext}
           activeOpacity={0.7}
-          accessibilityLabel={currentIndex < total - 1 ? 'Avançar para o próximo item' : 'Finalizar inspeção'}
+          accessibilityLabel={currentIndex < total - 1 ? 'Avançar' : 'Finalizar inspeção'}
         >
           <AppText style={styles.footerBtnText}>
             {currentIndex < total - 1 ? 'Avançar' : 'Finalizar'}
@@ -667,7 +889,6 @@ export default function ChecklistExecutionScreen() {
 const inputStyles = StyleSheet.create({
   group: { gap: 10, marginBottom: 4 },
 
-  // Conformidade
   conformityBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -686,7 +907,6 @@ const inputStyles = StyleSheet.create({
     color: '#132539',
   },
 
-  // Boolean
   boolBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -704,7 +924,6 @@ const inputStyles = StyleSheet.create({
     color: '#132539',
   },
 
-  // Text / Number / Date
   textBox: {
     borderWidth: 1,
     borderColor: '#D0D0D0',
@@ -722,7 +941,6 @@ const inputStyles = StyleSheet.create({
     textAlignVertical: 'top',
   },
 
-  // Choice
   choiceBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -748,7 +966,6 @@ const inputStyles = StyleSheet.create({
     color: '#2E7D32',
   },
 
-  // Evidências
   evidenceWarning: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -800,6 +1017,17 @@ const inputStyles = StyleSheet.create({
     position: 'relative',
   },
   previewImg: { width: '100%', height: '100%' },
+  syncedBadge: {
+    position: 'absolute',
+    bottom: 4,
+    left: 4,
+    backgroundColor: 'rgba(255,255,255,0.85)',
+    borderRadius: 8,
+    width: 16,
+    height: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   previewRemove: {
     position: 'absolute',
     top: 4,
@@ -820,7 +1048,6 @@ const inputStyles = StyleSheet.create({
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFFFFF' },
 
-  // Header
   header: {
     backgroundColor: '#132539',
     flexDirection: 'row',
@@ -832,10 +1059,9 @@ const styles = StyleSheet.create({
   backButton: { padding: 4 },
   headerTitle: { flex: 1, textAlign: 'center' },
   headerField: { color: '#FFFFFF', fontSize: 15, fontFamily: 'Inter_700Bold' },
-  headerOps:   { color: '#45A835', fontSize: 15, fontFamily: 'Inter_700Bold' },
+  headerOps: { color: '#45A835', fontSize: 15, fontFamily: 'Inter_700Bold' },
   headerSpacer: { width: 30 },
 
-  // Progress bar abaixo do header
   progressTrack: {
     height: 4,
     backgroundColor: '#E0E0E0',
@@ -845,7 +1071,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#45A835',
   },
 
-  // Scroll
   scroll: { flex: 1 },
   scrollContent: {
     paddingHorizontal: 20,
@@ -854,7 +1079,6 @@ const styles = StyleSheet.create({
     gap: 16,
   },
 
-  // Item
   itemTitle: {
     fontSize: 20,
     fontFamily: 'Inter_700Bold',
@@ -869,7 +1093,6 @@ const styles = StyleSheet.create({
     marginTop: -8,
   },
 
-  // Aviso obrigatório
   requiredWarning: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -886,7 +1109,6 @@ const styles = StyleSheet.create({
     color: '#E53935',
   },
 
-  // Evidência label
   evidenceTitle: {
     fontSize: 13,
     fontFamily: 'Inter_600SemiBold',
@@ -894,7 +1116,6 @@ const styles = StyleSheet.create({
     marginBottom: -8,
   },
 
-  // Observação
   observationLabel: {
     fontSize: 13,
     fontFamily: 'Inter_400Regular',
@@ -914,7 +1135,6 @@ const styles = StyleSheet.create({
     textAlignVertical: 'top',
   },
 
-  // Rodapé
   footer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -942,7 +1162,6 @@ const styles = StyleSheet.create({
     color: '#132539',
   },
 
-  // Not found
   notFound: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 12 },
   notFoundText: { fontSize: 15, color: '#555', fontFamily: 'Inter_400Regular' },
   backLink: { fontSize: 14, color: '#1E88E5', fontFamily: 'Inter_700Bold' },

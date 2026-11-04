@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback, useEffect } from 'react';
 import {
   View,
   ScrollView,
@@ -7,60 +7,53 @@ import {
   StatusBar,
   Modal,
   Pressable,
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
 import {
+  Wifi,
   WifiOff,
   ChevronRight,
   ClipboardList,
   RefreshCw,
   User,
   FileX,
+  DownloadCloud,
 } from 'lucide-react-native';
 import { useNavigation } from '@react-navigation/native';
 import { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 import { CompositeNavigationProp } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import NetInfo from '@react-native-community/netinfo';
 
 import AppText from '../components/AppText';
-import {
-  MOCK_INSPECTIONS,
-  Inspection,
-  InspectionStatus,
-  Priority,
-} from '../data/inspections';
 import { MainTabParamList, RootStackParamList } from '../navigation/AppNavigator';
+import { useAuth } from '../context/AuthContext';
+import { getLocalInspections, getLocalResponses } from '../services/storage';
+import { downloadInspections, getPendingSyncCount } from '../services/syncEngine';
+import type { LocalInspection } from '../types/api';
+import { inspectionStatusLabel } from '../types/api';
 
 type InspectionsNavProp = CompositeNavigationProp<
   BottomTabNavigationProp<MainTabParamList, 'Inspeções'>,
   NativeStackNavigationProp<RootStackParamList>
 >;
 
-type FilterOption = 'Todas' | InspectionStatus;
-const FILTERS: FilterOption[] = [
-  'Todas',
-  'Atribuída',
-  'Em Andamento',
-  'Atrasada',
-  'Devolvida',
-];
+type FilterOption = 'Todas' | 'Atribuída' | 'Em Andamento' | 'Concluída';
 
-const priorityColors: Record<Priority, string> = {
-  Alta: '#E53935',
-  Média: '#FFA000',
-  Baixa: '#1E88E5',
+const FILTERS: FilterOption[] = ['Todas', 'Atribuída', 'Em Andamento', 'Concluída'];
+
+// Mapeia filtro → status da API
+const FILTER_TO_STATUS: Record<FilterOption, string | null> = {
+  Todas: null,
+  Atribuída: 'SCHEDULED',
+  'Em Andamento': 'IN_PROGRESS',
+  Concluída: 'COMPLETED',
 };
 
 // ─────────────────────────────────────────────────────────────
 // Componentes internos
 // ─────────────────────────────────────────────────────────────
-
-function PriorityBadge({ priority }: { priority: Priority }) {
-  return (
-    <View style={[styles.badge, { backgroundColor: priorityColors[priority] }]}>
-      <AppText style={styles.badgeText}>{priority}</AppText>
-    </View>
-  );
-}
 
 function ProgressBar({ progress }: { progress: number }) {
   return (
@@ -72,16 +65,20 @@ function ProgressBar({ progress }: { progress: number }) {
 
 function InspectionCard({
   item,
+  progress,
   onPress,
 }: {
-  item: Inspection;
+  item: LocalInspection;
+  progress: number;
   onPress: () => void;
 }) {
   return (
     <TouchableOpacity style={styles.card} activeOpacity={0.7} onPress={onPress}>
       <View style={styles.cardHeader}>
         <View style={styles.cardHeaderLeft}>
-          <PriorityBadge priority={item.priority} />
+          <AppText style={styles.cardStatus}>
+            {inspectionStatusLabel(item.status)}
+          </AppText>
           <AppText style={styles.cardCode}>{item.code}</AppText>
         </View>
         <ChevronRight size={18} color="#999" />
@@ -90,39 +87,31 @@ function InspectionCard({
       <AppText style={styles.cardTitle}>{item.title}</AppText>
 
       <View style={styles.progressRow}>
-        <ProgressBar progress={item.progress} />
-        <AppText style={styles.progressLabel}>{item.progress}%</AppText>
+        <ProgressBar progress={progress} />
+        <AppText style={styles.progressLabel}>{progress}%</AppText>
       </View>
 
-      <AppText
-        style={[
-          styles.deadline,
-          item.deadlineOverdue && styles.deadlineOverdue,
-        ]}
-      >
-        Prazo:{' '}
-        <AppText
-          style={[
-            styles.deadlineValue,
-            item.deadlineOverdue && styles.deadlineOverdue,
-          ]}
-        >
-          {item.deadline}
+      {item.equipmentName ? (
+        <AppText style={styles.cardInfo}>{item.equipmentName}</AppText>
+      ) : null}
+      {item.scheduledDate ? (
+        <AppText style={styles.cardInfo}>
+          Prazo: {new Date(item.scheduledDate).toLocaleDateString('pt-BR')}
         </AppText>
-      </AppText>
+      ) : null}
     </TouchableOpacity>
   );
 }
 
-function EmptyState({ filter }: { filter: FilterOption }) {
-  const message =
-    filter === 'Todas'
-      ? 'Nenhuma inspeção atribuída.'
-      : `Nenhuma inspeção com status "${filter}".`;
+function EmptyState({ hasInspections }: { hasInspections: boolean }) {
   return (
     <View style={styles.emptyContainer}>
       <FileX size={48} color="#BDBDBD" />
-      <AppText style={styles.emptyText}>{message}</AppText>
+      <AppText style={styles.emptyText}>
+        {hasInspections
+          ? 'Nenhuma inspeção com este filtro.'
+          : 'Nenhuma inspeção baixada. Toque em "Baixar" para sincronizar com o servidor.'}
+      </AppText>
     </View>
   );
 }
@@ -133,14 +122,17 @@ function EmptyState({ filter }: { filter: FilterOption }) {
 
 function InspectionModal({
   inspection,
+  progress,
+  pendingCount,
   onClose,
-  onScan,
+  onStart,
 }: {
-  inspection: Inspection | null;
+  inspection: LocalInspection | null;
+  progress: number;
+  pendingCount: number;
   onClose: () => void;
-  onScan: () => void;
+  onStart: () => void;
 }) {
-  // Modal não visível se não houver inspeção selecionada
   if (!inspection) return null;
 
   return (
@@ -150,50 +142,49 @@ function InspectionModal({
       animationType="fade"
       onRequestClose={onClose}
     >
-      {/* Overlay escurecido — toque fora fecha o modal */}
       <Pressable style={styles.modalOverlay} onPress={onClose}>
-        {/* O stopPropagation impede que o toque dentro do card feche o modal */}
-        <Pressable
-          style={styles.modalCard}
-          onPress={(e) => e.stopPropagation()}
-        >
-          {/* Título */}
+        <Pressable style={styles.modalCard} onPress={(e) => e.stopPropagation()}>
           <AppText style={styles.modalTitle}>{inspection.title}</AppText>
 
-          {/* Linha: badge de prioridade + código + prazo */}
           <View style={styles.modalSubHeader}>
-            <PriorityBadge priority={inspection.priority} />
             <AppText style={styles.modalCode}>{inspection.code}</AppText>
-            <View style={styles.modalDeadlineGroup}>
-              <AppText style={styles.modalDeadlineLabel}>Prazo: </AppText>
-              <AppText
-                style={[
-                  styles.modalDeadlineValue,
-                  inspection.deadlineOverdue && styles.deadlineOverdue,
-                ]}
-              >
-                {inspection.deadline}
-              </AppText>
-            </View>
+            <AppText style={styles.modalStatus}>
+              {inspectionStatusLabel(inspection.status)}
+            </AppText>
           </View>
 
-          {/* Informações */}
           <View style={styles.modalInfoBlock}>
+            {inspection.clientName ? (
+              <AppText style={styles.modalInfoLine}>
+                Cliente: {inspection.clientName}
+              </AppText>
+            ) : null}
+            {inspection.siteName ? (
+              <AppText style={styles.modalInfoLine}>
+                Local: {inspection.siteName}
+              </AppText>
+            ) : null}
+            {inspection.equipmentName ? (
+              <AppText style={styles.modalInfoLine}>
+                Equipamento: {inspection.equipmentName}
+              </AppText>
+            ) : null}
+            {inspection.scheduledDate ? (
+              <AppText style={styles.modalInfoLine}>
+                Prazo: {new Date(inspection.scheduledDate).toLocaleDateString('pt-BR')}
+              </AppText>
+            ) : null}
             <AppText style={styles.modalInfoLine}>
-              Atribuinte : {inspection.assignee}
+              Itens: {inspection.itemSnapshots.length}
             </AppText>
-            <AppText style={styles.modalInfoLine}>
-              Equipamento : {inspection.equipment}
-            </AppText>
-            <AppText style={styles.modalInfoLine}>
-              Tempo estimado : {inspection.estimatedTime}
-            </AppText>
-            <AppText style={styles.modalInfoLine}>
-              Área : {inspection.area}
-            </AppText>
+            <AppText style={styles.modalInfoLine}>Progresso: {progress}%</AppText>
+            {pendingCount > 0 ? (
+              <AppText style={styles.modalInfoLine}>
+                Pendências de sync: {pendingCount}
+              </AppText>
+            ) : null}
           </View>
 
-          {/* Botões */}
           <View style={styles.modalButtons}>
             <TouchableOpacity
               style={styles.btnCancel}
@@ -205,7 +196,7 @@ function InspectionModal({
 
             <TouchableOpacity
               style={styles.btnScan}
-              onPress={onScan}
+              onPress={onStart}
               activeOpacity={0.7}
             >
               <AppText style={styles.btnScanText}>Iniciar</AppText>
@@ -223,26 +214,77 @@ function InspectionModal({
 
 export default function InspectionsScreen() {
   const navigation = useNavigation<InspectionsNavProp>();
-  const [activeFilter, setActiveFilter] = useState<FilterOption>('Todas');
+  const { user } = useAuth();
 
-  // Guarda a inspeção selecionada; null = modal fechado
-  const [selectedInspection, setSelectedInspection] =
-    useState<Inspection | null>(null);
+  const [activeFilter, setActiveFilter] = useState<FilterOption>('Todas');
+  const [selectedInspection, setSelectedInspection] = useState<LocalInspection | null>(null);
+  const [inspections, setInspections] = useState<LocalInspection[]>([]);
+  const [progressMap, setProgressMap] = useState<Record<number, number>>({});
+  const [isOnline, setIsOnline] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
+
+  // Carrega inspeções locais e progresso ao montar
+  const loadLocalData = useCallback(async () => {
+    const local = await getLocalInspections();
+    setInspections(local);
+
+    // Calcula progresso de cada inspeção
+    const progress: Record<number, number> = {};
+    for (const insp of local) {
+      const responses = await getLocalResponses(insp.id);
+      const answered = Object.keys(responses).length;
+      const total = insp.itemSnapshots.length || 1;
+      progress[insp.id] = Math.round((answered / total) * 100);
+    }
+    setProgressMap(progress);
+
+    // Conta pendências de sync
+    setPendingCount(await getPendingSyncCount());
+  }, []);
+
+  useEffect(() => {
+    loadLocalData();
+  }, [loadLocalData]);
+
+  // Monitora status de rede
+  useEffect(() => {
+    const unsub = NetInfo.addEventListener((state) => {
+      setIsOnline(state.isConnected ?? false);
+    });
+    return () => unsub();
+  }, []);
+
+  // Download de inspeções do servidor
+  const handleDownload = useCallback(async () => {
+    if (!user) return;
+    setDownloading(true);
+    try {
+      const count = await downloadInspections(user.id);
+      await loadLocalData();
+      Alert.alert('Download concluído', `${count} inspeção(ões) baixada(s).`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erro ao baixar inspeções.';
+      Alert.alert('Falha no download', msg);
+    } finally {
+      setDownloading(false);
+    }
+  }, [user, loadLocalData]);
 
   const filteredInspections = useMemo(() => {
-    if (activeFilter === 'Todas') return MOCK_INSPECTIONS;
-    return MOCK_INSPECTIONS.filter((i) => i.status === activeFilter);
-  }, [activeFilter]);
+    const statusFilter = FILTER_TO_STATUS[activeFilter];
+    if (!statusFilter) return inspections;
+    return inspections.filter((i) => i.status === statusFilter);
+  }, [inspections, activeFilter]);
 
   const counts = useMemo(
     () => ({
-      assigned: MOCK_INSPECTIONS.length,
-      inProgress: MOCK_INSPECTIONS.filter((i) => i.status === 'Em Andamento')
-        .length,
-      overdue: MOCK_INSPECTIONS.filter((i) => i.status === 'Atrasada').length,
-      returned: MOCK_INSPECTIONS.filter((i) => i.status === 'Devolvida').length,
+      assigned: inspections.filter((i) => i.status === 'SCHEDULED').length,
+      inProgress: inspections.filter((i) => i.status === 'IN_PROGRESS').length,
+      completed: inspections.filter((i) => i.status === 'COMPLETED').length,
+      total: inspections.length,
     }),
-    [],
+    [inspections],
   );
 
   return (
@@ -256,14 +298,42 @@ export default function InspectionsScreen() {
           <AppText style={styles.headerBrandOps}>OPS</AppText>
         </AppText>
         <View style={styles.offlineContainer}>
-          <AppText style={styles.offlineText}>Modo Offline</AppText>
-          <WifiOff size={18} color="#E53935" style={styles.offlineIcon} />
+          {isOnline ? (
+            <>
+              <AppText style={styles.onlineText}>Online</AppText>
+              <Wifi size={18} color="#45A835" style={styles.offlineIcon} />
+            </>
+          ) : (
+            <>
+              <AppText style={styles.offlineText}>Modo Offline</AppText>
+              <WifiOff size={18} color="#E53935" style={styles.offlineIcon} />
+            </>
+          )}
         </View>
       </View>
 
       {/* ── Título + Contadores ─────────────────────────── */}
       <View style={styles.titleSection}>
-        <AppText style={styles.screenTitle}>Minhas Inspeções</AppText>
+        <View style={styles.titleRow}>
+          <AppText style={styles.screenTitle}>Minhas Inspeções</AppText>
+          {isOnline && (
+            <TouchableOpacity
+              style={styles.downloadBtn}
+              onPress={handleDownload}
+              disabled={downloading}
+              activeOpacity={0.7}
+            >
+              {downloading ? (
+                <ActivityIndicator size={16} color="#FFFFFF" />
+              ) : (
+                <DownloadCloud size={16} color="#FFFFFF" />
+              )}
+              <AppText style={styles.downloadBtnText}>
+                {downloading ? 'Baixando...' : 'Baixar'}
+              </AppText>
+            </TouchableOpacity>
+          )}
+        </View>
         <View style={styles.statsRow}>
           <View style={styles.statCard}>
             <AppText style={styles.statNumber}>{counts.assigned}</AppText>
@@ -273,22 +343,20 @@ export default function InspectionsScreen() {
             <AppText style={styles.statNumber}>{counts.inProgress}</AppText>
             <AppText style={styles.statLabel}>EM ANDAMENTO</AppText>
           </View>
-          <View style={[styles.statCard, styles.statCardAlert]}>
-            <AppText style={[styles.statNumber, styles.statNumberAlert]}>
-              {counts.overdue}
-            </AppText>
-            <AppText style={[styles.statLabel, styles.statLabelAlert]}>
-              ATRASADAS
-            </AppText>
+          <View style={styles.statCard}>
+            <AppText style={styles.statNumber}>{counts.completed}</AppText>
+            <AppText style={styles.statLabel}>CONCLUÍDAS</AppText>
           </View>
-          <View style={[styles.statCard, styles.statCardReturned]}>
-            <AppText style={[styles.statNumber, styles.statNumberReturned]}>
-              {counts.returned}
-            </AppText>
-            <AppText style={[styles.statLabel, styles.statLabelReturned]}>
-              DEVOLVIDAS
-            </AppText>
-          </View>
+          {pendingCount > 0 && (
+            <View style={[styles.statCard, styles.statCardAlert]}>
+              <AppText style={[styles.statNumber, styles.statNumberAlert]}>
+                {pendingCount}
+              </AppText>
+              <AppText style={[styles.statLabel, styles.statLabelAlert]}>
+                PENDÊNCIAS
+              </AppText>
+            </View>
+          )}
         </View>
       </View>
 
@@ -323,7 +391,7 @@ export default function InspectionsScreen() {
 
       {/* ── Lista ou estado vazio ───────────────────────── */}
       {filteredInspections.length === 0 ? (
-        <EmptyState filter={activeFilter} />
+        <EmptyState hasInspections={inspections.length > 0} />
       ) : (
         <ScrollView
           style={styles.list}
@@ -334,6 +402,7 @@ export default function InspectionsScreen() {
             <InspectionCard
               key={item.id}
               item={item}
+              progress={progressMap[item.id] ?? 0}
               onPress={() => setSelectedInspection(item)}
             />
           ))}
@@ -367,11 +436,13 @@ export default function InspectionsScreen() {
       {/* ── Modal de detalhe ────────────────────────────── */}
       <InspectionModal
         inspection={selectedInspection}
+        progress={selectedInspection ? progressMap[selectedInspection.id] ?? 0 : 0}
+        pendingCount={pendingCount}
         onClose={() => setSelectedInspection(null)}
-        onScan={() => {
-          const id = selectedInspection?.id ?? '';
+        onStart={() => {
+          const id = selectedInspection?.id ?? 0;
           setSelectedInspection(null);
-          navigation.navigate('ChecklistExecution', { inspectionId: id });
+          navigation.navigate('ChecklistExecution', { inspectionId: String(id) });
         }}
       />
     </View>
@@ -385,7 +456,6 @@ export default function InspectionsScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F4F4F4' },
 
-  // Header
   header: {
     backgroundColor: '#132539',
     flexDirection: 'row',
@@ -412,23 +482,45 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontFamily: 'Inter_600SemiBold',
   },
+  onlineText: {
+    color: '#45A835',
+    fontSize: 13,
+    fontFamily: 'Inter_600SemiBold',
+  },
   offlineIcon: { marginLeft: 4 },
 
-  // Title + Stats
   titleSection: {
     backgroundColor: '#132539',
     paddingHorizontal: 15,
     paddingBottom: 24,
     paddingTop: 10,
   },
+  titleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+    paddingHorizontal: 5,
+  },
   screenTitle: {
     color: '#FFFFFF',
     fontSize: 20,
     fontFamily: 'Inter_700Bold',
-    marginBottom: 16,
-    paddingHorizontal: 5,
   },
-  statsGrid: { gap: 8 },
+  downloadBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#45A835',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 6,
+  },
+  downloadBtnText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontFamily: 'Inter_600SemiBold',
+  },
   statsRow: { flexDirection: 'row', gap: 10 },
   statCard: {
     flex: 1,
@@ -447,11 +539,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   statLabelAlert: { color: '#E53935' },
-  statCardReturned: { backgroundColor: '#FFF3E0' },
-  statNumberReturned: { color: '#E65100' },
-  statLabelReturned: { color: '#E65100' },
 
-  // Filtros
   filtersScroll: {
     backgroundColor: '#FFFFFF',
     borderBottomWidth: 1,
@@ -481,11 +569,9 @@ const styles = StyleSheet.create({
   },
   filterChipTextActive: { color: '#FFFFFF', fontFamily: 'Inter_700Bold' },
 
-  // Lista
   list: { flex: 1 },
   listContent: { padding: 16, gap: 12 },
 
-  // Card
   card: {
     backgroundColor: '#FFFFFF',
     borderRadius: 6,
@@ -503,6 +589,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   cardHeaderLeft: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  cardStatus: { fontSize: 12, color: '#45A835', fontFamily: 'Inter_600SemiBold' },
   cardCode: { fontSize: 13, color: '#555', fontFamily: 'Inter_400Regular' },
   cardTitle: {
     fontSize: 15,
@@ -510,12 +597,13 @@ const styles = StyleSheet.create({
     color: '#132539',
     marginBottom: 12,
   },
+  cardInfo: {
+    fontSize: 13,
+    color: '#555',
+    fontFamily: 'Inter_400Regular',
+    marginTop: 4,
+  },
 
-  // Badge
-  badge: { borderRadius: 4, paddingHorizontal: 10, paddingVertical: 3 },
-  badgeText: { color: '#FFFFFF', fontSize: 12, fontFamily: 'Inter_700Bold' },
-
-  // Progress
   progressRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -538,12 +626,6 @@ const styles = StyleSheet.create({
     textAlign: 'right',
   },
 
-  // Deadline
-  deadline: { fontSize: 13, color: '#555', fontFamily: 'Inter_400Regular' },
-  deadlineValue: { fontFamily: 'Inter_400Regular', color: '#555' },
-  deadlineOverdue: { color: '#E53935', fontFamily: 'Inter_700Bold' },
-
-  // Empty state
   emptyContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -558,7 +640,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  // Tab Bar
   tabBar: {
     flexDirection: 'row',
     backgroundColor: '#FFFFFF',
@@ -575,7 +656,6 @@ const styles = StyleSheet.create({
     fontFamily: 'Inter_700Bold',
   },
 
-  // ── Modal ──────────────────────────────────────────────────
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.45)',
@@ -605,27 +685,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
     marginBottom: 16,
-    flexWrap: 'wrap',
   },
   modalCode: {
     fontSize: 13,
     color: '#555',
     fontFamily: 'Inter_400Regular',
   },
-  modalDeadlineGroup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginLeft: 'auto',
-  },
-  modalDeadlineLabel: {
+  modalStatus: {
     fontSize: 13,
-    color: '#555',
-    fontFamily: 'Inter_400Regular',
-  },
-  modalDeadlineValue: {
-    fontSize: 13,
-    color: '#555',
-    fontFamily: 'Inter_700Bold',
+    color: '#45A835',
+    fontFamily: 'Inter_600SemiBold',
   },
   modalInfoBlock: {
     gap: 6,
