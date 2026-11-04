@@ -36,7 +36,19 @@ export type SyncStatusApi = 'PENDING' | 'PROCESSING' | 'SUCCESS' | 'FAILED' | 'S
 
 export type UserRoleApi = 'ADMIN' | 'SUPERVISOR' | 'TECNICO';
 
+export type EquipmentStatusApi = 'ACTIVE' | 'INACTIVE' | 'DECOMMISSIONED';
+
 // ─── DTOs de resposta da API ────────────────────────────────────
+
+export interface EquipmentResponseApi {
+  id: number;
+  name: string;
+  description: string;
+  qrCode: string;
+  status: EquipmentStatusApi;
+  siteId: number;
+  siteName: string;
+}
 
 export interface UserResponseApi {
   id: number;

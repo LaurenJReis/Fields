@@ -8,6 +8,7 @@ import type {
   ApiResponseApi,
   LoginResponseApi,
   InspectionResponseApi,
+  EquipmentResponseApi,
   SyncBatchRequestApi,
   SyncBatchResponseApi,
 } from '../types/api';
@@ -87,6 +88,22 @@ export async function fetchInspectionById(
   }
 
   return (await response.json()) as InspectionResponseApi;
+}
+
+// ─── Equipamentos ────────────────────────────────────────────────
+
+/** Busca equipamento pelo QR Code (usado ao escanear no mobile). */
+export async function fetchEquipmentByQrCode(
+  qrCode: string,
+): Promise<EquipmentResponseApi> {
+  const response = await authFetch(`/api/v1/equipments/qrcode/${encodeURIComponent(qrCode)}`);
+
+  if (!response.ok) {
+    throw new Error(`Equipamento não encontrado para o QR Code: ${qrCode}`);
+  }
+
+  const json: ApiResponseApi<EquipmentResponseApi> = await response.json();
+  return json.data as EquipmentResponseApi;
 }
 
 // ─── Sync ───────────────────────────────────────────────────────

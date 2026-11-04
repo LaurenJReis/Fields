@@ -1,13 +1,23 @@
 import { useState, useCallback } from 'react';
-import { View, TouchableOpacity, StyleSheet, StatusBar } from 'react-native';
+import {
+  View,
+  TouchableOpacity,
+  StyleSheet,
+  StatusBar,
+  ActivityIndicator,
+  Alert,
+} from 'react-native';
 import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
-import { ArrowLeft, ScanLine } from 'lucide-react-native';
+import { ArrowLeft, ScanLine, CheckCircle2, AlertCircle } from 'lucide-react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import NetInfo from '@react-native-community/netinfo';
 
 import AppText from '../components/AppText';
 import { RootStackParamList } from '../navigation/AppNavigator';
-import { MOCK_CHECKLIST } from '../data/inspections';
+import { fetchEquipmentByQrCode } from '../services/apiClient';
+import { getLocalInspection } from '../services/storage';
+import type { EquipmentResponseApi } from '../types/api';
 
 type ScannerRouteProp = RouteProp<RootStackParamList, 'QRScanner'>;
 type ScannerNavProp = NativeStackNavigationProp<RootStackParamList>;
@@ -19,6 +29,7 @@ export default function QRScannerScreen() {
 
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
+  const [lookingUp, setLookingUp] = useState(false);
 
   // ── Permissão ainda não solicitada ───────────────────────
   if (!permission) {
@@ -67,18 +78,96 @@ export default function QRScannerScreen() {
 
   // ── Leitura do QR code ───────────────────────────────────
   const handleBarCodeScanned = useCallback(
-    ({ data }: BarcodeScanningResult) => {
-      if (scanned) return;
+    async ({ data }: BarcodeScanningResult) => {
+      if (scanned || lookingUp) return;
       setScanned(true);
+      setLookingUp(true);
 
-      // O QR code do equipamento deve conter o inspectionId.
-      // Se o dado lido corresponde a uma inspeção existente, abre o formulário.
-      // Caso contrário, usa o inspectionId passado como parâmetro (fallback dev).
-      const targetId = MOCK_CHECKLIST[data] ? data : inspectionId;
+      const inspectionIdNum = Number(inspectionId);
 
-      navigation.replace('InspectionForm', { inspectionId: targetId });
+      // Verifica se está online
+      const netState = await NetInfo.fetch();
+      const isOnline = netState.isConnected ?? false;
+
+      if (isOnline) {
+        // Online: busca equipamento na API
+        try {
+          const equipment = await fetchEquipmentByQrCode(data);
+
+          // Verifica se o QR code bate com o equipamento da inspeção
+          const inspection = await getLocalInspection(inspectionIdNum);
+          const qrMatch =
+            !inspection?.equipmentQrCode ||
+            inspection.equipmentQrCode === data;
+
+          Alert.alert(
+            qrMatch ? 'Equipamento identificado' : 'Atenção: QR não coincide',
+            `${equipment.name}\n${equipment.siteName ?? ''}\nQR: ${data}\n\n${
+              qrMatch
+                ? 'Equipamento corresponde à inspeção.'
+                : 'O QR code escaneado não corresponde ao equipamento da inspeção selecionada. Deseja continuar mesmo assim?'
+            }`,
+            [
+              { text: 'Cancelar', onPress: () => { setScanned(false); setLookingUp(false); } },
+              {
+                text: 'Continuar',
+                onPress: () => {
+                  setLookingUp(false);
+                  navigation.replace('ChecklistExecution', { inspectionId });
+                },
+              },
+            ],
+          );
+        } catch {
+          Alert.alert(
+            'Equipamento não encontrado',
+            `Nenhum equipamento cadastrado para o QR code: ${data}`,
+            [
+              { text: 'Escanear novamente', onPress: () => { setScanned(false); setLookingUp(false); } },
+            ],
+          );
+        }
+      } else {
+        // Offline: valida contra a inspeção local
+        const inspection = await getLocalInspection(inspectionIdNum);
+
+        if (inspection?.equipmentQrCode && inspection.equipmentQrCode === data) {
+          Alert.alert(
+            'Equipamento identificado (offline)',
+            `${inspection.equipmentName ?? 'Equipamento'}\nQR validado localmente.`,
+            [
+              {
+                text: 'Iniciar inspeção',
+                onPress: () => {
+                  setLookingUp(false);
+                  navigation.replace('ChecklistExecution', { inspectionId });
+                },
+              },
+            ],
+          );
+        } else if (inspection?.equipmentQrCode) {
+          Alert.alert(
+            'QR não coincide',
+            'O QR code escaneado não corresponde ao equipamento da inspeção.',
+            [
+              { text: 'Escanear novamente', onPress: () => { setScanned(false); setLookingUp(false); } },
+              {
+                text: 'Continuar mesmo assim',
+                onPress: () => {
+                  setLookingUp(false);
+                  navigation.replace('ChecklistExecution', { inspectionId });
+                },
+              },
+            ],
+          );
+        } else {
+          // Sem QR code na inspeção local — permite prosseguir
+          setLookingUp(false);
+          navigation.replace('ChecklistExecution', { inspectionId });
+        }
+      }
     },
-    [scanned, inspectionId, navigation],
+    [scanned, lookingUp, inspectionId, navigation],
   );
 
   return (
@@ -141,7 +230,7 @@ export default function QRScannerScreen() {
       </View>
 
       {/* ── Botão de reescanear (aparece após leitura falha) ── */}
-      {scanned && (
+      {scanned && !lookingUp && (
         <View style={styles.rescanContainer}>
           <TouchableOpacity
             style={styles.rescanBtn}
@@ -150,6 +239,14 @@ export default function QRScannerScreen() {
           >
             <AppText style={styles.rescanText}>Escanear novamente</AppText>
           </TouchableOpacity>
+        </View>
+      )}
+
+      {/* ── Loading overlay ao buscar equipamento ──────────── */}
+      {lookingUp && (
+        <View style={styles.loadingOverlay}>
+          <ActivityIndicator size="large" color="#45A835" />
+          <AppText style={styles.loadingText}>Identificando equipamento...</AppText>
         </View>
       )}
     </View>
@@ -274,6 +371,21 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 14,
     fontFamily: 'Inter_700Bold',
+  },
+
+  // Loading overlay
+  loadingOverlay: {
+    position: 'absolute',
+    bottom: 40,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    gap: 12,
+  },
+  loadingText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontFamily: 'Inter_400Regular',
   },
 
   // Permissão

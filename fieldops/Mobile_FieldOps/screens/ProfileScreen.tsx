@@ -4,6 +4,9 @@ import {
   TouchableOpacity,
   StyleSheet,
   StatusBar,
+  Modal,
+  TextInput,
+  Alert,
 } from 'react-native';
 import {
   WifiOff,
@@ -15,13 +18,16 @@ import {
   Bell,
   HelpCircle,
   LogOut,
+  Server,
 } from 'lucide-react-native';
 import { useNavigation } from '@react-navigation/native';
 import { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
+import { useState, useEffect, useCallback } from 'react';
 
 import AppText from '../components/AppText';
 import { MainTabParamList } from '../navigation/AppNavigator';
 import { useAuth } from '../context/AuthContext';
+import { getApiUrl, setApiUrl } from '../services/storage';
 
 type ProfileNavProp = BottomTabNavigationProp<MainTabParamList, 'Perfil'>;
 
@@ -45,13 +51,16 @@ interface MenuItemProps {
   label: string;
   subtitle?: string;
   isFirst?: boolean;
+  onPress?: () => void;
 }
 
-function MenuItem({ icon, label, subtitle, isFirst }: MenuItemProps) {
+function MenuItem({ icon, label, subtitle, isFirst, onPress }: MenuItemProps) {
   return (
     <TouchableOpacity
       style={[styles.menuItem, !isFirst && styles.menuItemBorder]}
-      activeOpacity={0.6}
+      activeOpacity={onPress ? 0.6 : 1}
+      onPress={onPress}
+      disabled={!onPress}
     >
       <View style={styles.menuIcon}>{icon}</View>
       <View style={styles.menuText}>
@@ -71,6 +80,31 @@ function MenuItem({ icon, label, subtitle, isFirst }: MenuItemProps) {
 export default function ProfileScreen() {
   const navigation = useNavigation<ProfileNavProp>();
   const { user, logout } = useAuth();
+
+  // Estado do modal de configurações (URL da API)
+  const [showConfig, setShowConfig] = useState(false);
+  const [apiUrl, setApiUrlState] = useState('');
+  const [urlInput, setUrlInput] = useState('');
+
+  // Carrega a URL atual ao montar
+  useEffect(() => {
+    getApiUrl().then((url) => {
+      setApiUrlState(url);
+      setUrlInput(url);
+    });
+  }, []);
+
+  const handleSaveUrl = useCallback(async () => {
+    const trimmed = urlInput.trim();
+    if (!trimmed) {
+      Alert.alert('Erro', 'A URL da API não pode estar vazia.');
+      return;
+    }
+    await setApiUrl(trimmed);
+    setApiUrlState(trimmed);
+    setShowConfig(false);
+    Alert.alert('Configuração salva', `URL da API atualizada:\n${trimmed}`);
+  }, [urlInput]);
 
   // Fallback para quando o usuário ainda não estiver carregado
   const displayName = user?.name ?? '—';
@@ -161,6 +195,9 @@ export default function ProfileScreen() {
           <MenuItem
             icon={<Settings size={22} color="#555" />}
             label="Configurações"
+            subtitle={apiUrl || '—'}
+            isFirst={false}
+            onPress={() => setShowConfig(true)}
           />
           <MenuItem
             icon={<Bell size={22} color="#555" />}
@@ -208,6 +245,60 @@ export default function ProfileScreen() {
           <AppText style={styles.tabLabelActive}>PERFIL</AppText>
         </TouchableOpacity>
       </View>
+
+      {/* ── Modal de configurações (URL da API) ──────────── */}
+      <Modal
+        visible={showConfig}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowConfig(false)}
+      >
+        <TouchableOpacity
+          style={styles.configOverlay}
+          onPress={() => setShowConfig(false)}
+          activeOpacity={1}
+        >
+          <TouchableOpacity
+            style={styles.configCard}
+            onPress={(e) => e.stopPropagation()}
+            activeOpacity={1}
+          >
+            <View style={styles.configHeader}>
+              <Server size={22} color="#132539" />
+              <AppText style={styles.configTitle}>URL do Servidor</AppText>
+            </View>
+            <AppText style={styles.configDesc}>
+              Endereço do backend FieldOps. Use o endereço público da AWS em produção.
+            </AppText>
+            <TextInput
+              style={styles.configInput}
+              value={urlInput}
+              onChangeText={setUrlInput}
+              placeholder="https://seu-backend.elasticbeanstalk.com"
+              placeholderTextColor="#BDBDBD"
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+            />
+            <View style={styles.configButtons}>
+              <TouchableOpacity
+                style={styles.configBtnCancel}
+                onPress={() => setShowConfig(false)}
+                activeOpacity={0.7}
+              >
+                <AppText style={styles.configBtnCancelText}>Cancelar</AppText>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.configBtnSave}
+                onPress={handleSaveUrl}
+                activeOpacity={0.7}
+              >
+                <AppText style={styles.configBtnSaveText}>Salvar</AppText>
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
     </View>
   );
 }
@@ -394,6 +485,82 @@ const styles = StyleSheet.create({
   tabLabelActive: {
     fontSize: 10,
     color: '#45A835',
+    fontFamily: 'Inter_700Bold',
+  },
+
+  // Modal de configurações
+  configOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+  },
+  configCard: {
+    width: '100%',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 8,
+    padding: 24,
+  },
+  configHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 12,
+  },
+  configTitle: {
+    fontSize: 18,
+    fontFamily: 'Inter_700Bold',
+    color: '#132539',
+  },
+  configDesc: {
+    fontSize: 13,
+    fontFamily: 'Inter_400Regular',
+    color: '#666',
+    marginBottom: 16,
+    lineHeight: 18,
+  },
+  configInput: {
+    borderWidth: 1,
+    borderColor: '#D0D0D0',
+    borderRadius: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 14,
+    fontFamily: 'Inter_400Regular',
+    color: '#132539',
+    backgroundColor: '#FFFFFF',
+    marginBottom: 16,
+  },
+  configButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  configBtnCancel: {
+    flex: 1,
+    height: 44,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#45A835',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  configBtnCancelText: {
+    fontSize: 14,
+    color: '#45A835',
+    fontFamily: 'Inter_700Bold',
+  },
+  configBtnSave: {
+    flex: 1,
+    height: 44,
+    borderRadius: 4,
+    backgroundColor: '#45A835',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  configBtnSaveText: {
+    fontSize: 14,
+    color: '#FFFFFF',
     fontFamily: 'Inter_700Bold',
   },
 });
