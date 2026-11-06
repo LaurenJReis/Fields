@@ -44,7 +44,7 @@ export async function clearAuth(): Promise<void> {
 
 // ─── API URL configurável ────────────────────────────────────────
 
-const DEFAULT_API_URL = 'http://10.0.2.2:8080';
+const DEFAULT_API_URL = 'http://fieldops-api-prod.eba-pxu6drgm.us-east-2.elasticbeanstalk.com';
 
 export async function getApiUrl(): Promise<string> {
   const url = await AsyncStorage.getItem(KEYS.API_URL);

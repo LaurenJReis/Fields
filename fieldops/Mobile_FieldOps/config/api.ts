@@ -1,10 +1,7 @@
 /**
  * Base URL da API.
- * Em desenvolvimento, aponte para o IP da máquina que serve o backend
- * (localhost não funciona no dispositivo/emulador Android — use o IP da rede local).
- *
- * Exemplos:
- *   http://192.168.0.10:8080   → backend rodando na mesma rede Wi-Fi
- *   http://10.0.2.2:8080       → emulador Android acessando localhost do host
+ * Aponta para o backend em produção na AWS (Elastic Beanstalk).
+ * Para desenvolvimento local, altere via Perfil → Configurações no app.
  */
-export const API_BASE_URL = 'http://10.0.2.2:8080';
+export const API_BASE_URL =
+  'http://fieldops-api-prod.eba-pxu6drgm.us-east-2.elasticbeanstalk.com';
