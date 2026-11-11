@@ -11,8 +11,7 @@
     },
     "android": {
       "package": "com.experiencefieldops.fieldops",
-      "versionCode": 2,
-      "usesCleartextTraffic": true,
+      "versionCode": 3,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -32,6 +31,14 @@
     },
     "plugins": [
       "expo-font",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ],
       [
         "expo-camera",
         {
