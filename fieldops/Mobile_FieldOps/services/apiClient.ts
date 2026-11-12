@@ -57,7 +57,36 @@ export async function login(
   return (await response.json()) as LoginResponseApi;
 }
 
-// ─── Inspeções ──────────────────────────────────────────────────
+// ─── Registro ────────────────────────────────────────────────────
+
+export interface RegisterRequestApi {
+  name: string;
+  email: string;
+  password: string;
+  role: 'ADMIN' | 'SUPERVISOR' | 'TECNICO';
+}
+
+export async function register(data: RegisterRequestApi): Promise<void> {
+  const baseUrl = await getApiUrl();
+  const response = await fetch(`${baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    // Extrai mensagem legível do JSON de erro se houver
+    try {
+      const json = JSON.parse(text);
+      throw new Error(json.message ?? json.error ?? `Erro ${response.status}`);
+    } catch {
+      throw new Error(text || `Erro ${response.status} ao criar conta`);
+    }
+  }
+}
+
+
 
 /** Busca inspeções atribuídas ao técnico (com paginação). */
 export async function fetchAssignedInspections(
