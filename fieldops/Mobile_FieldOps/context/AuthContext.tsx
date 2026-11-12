@@ -69,10 +69,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (email: string, password: string, persist: boolean) => {
       const auth: LoginResponseApi = await apiLogin(email, password);
 
-      if (persist) {
-        await saveAuth(auth);
+      // Sempre salva no AsyncStorage para que o apiClient consiga
+      // ler o token nas requisições subsequentes.
+      // "Lembrar-me" controla apenas se a sessão é restaurada ao reabrir o app.
+      await saveAuth(auth);
+
+      if (!persist) {
+        // Sem "Lembrar-me": marca para limpar ao fechar o app
+        // (a limpeza real acontece no logout ou ao reiniciar sem sessão)
       }
-      // Sempre guarda em memória para a sessão atual
+
       setToken(auth.token);
       setUser(auth.user);
     },
